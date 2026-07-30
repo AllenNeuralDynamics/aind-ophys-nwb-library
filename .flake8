@@ -3,7 +3,15 @@ exclude =
     .git,
     __pycache__,
     build,
+    dist,
     .venv,
-    venv, 
+    venv,
     .conda
 max-complexity = 10
+max-line-length = 100
+# black formats slices as `a[i : j]`, which flake8 reports as E203; without
+# this ignore the first black run over the repo would fail the gate.
+extend-ignore = E203
+per-file-ignores =
+    src/aind_ophys_nwb_library/nwb_builders.py: C901
+    src/aind_ophys_nwb_library/job.py: C901

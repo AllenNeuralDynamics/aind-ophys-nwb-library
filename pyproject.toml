@@ -4,9 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aind-ophys-nwb-library"
-description = "Generated from aind-library-template"
+description = "NWB packaging of AIND planar-ophys pipeline outputs"
 license = "MIT"
-requires-python = ">=3.10"
+# Floor: verified 2026-07-30 that every dependency below IMPORTS (not merely
+# installs) on 3.10.19, 3.11.14 and 3.12.12, and that pynwb 4.1.0 / hdmf 6.1.0
+# / hdmf-zarr 0.13.0 write and re-read a Zarr NWB file carrying this library's
+# full object graph plus the ndx-aibs-behavior-ophys extension.
+# Ceiling: aind-pophys-metadata declares requires-python ">=3.10,<3.13", so
+# 3.13+ is unsupported however well it happens to install.
+requires-python = ">=3.10,<3.13"
 authors = [
     {name = "Allen Institute for Neural Dynamics"}
 ]
@@ -17,6 +23,55 @@ readme = "README.md"
 version = "0.1.0"
 
 dependencies = [
+    "aind-data-schema==2.8.1",
+    "aind-data-schema-models==5.7.3",
+    "aind-qcportal-schema==0.6.4",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@ad94805247b21a55c8e4bc03eda3f9650b41240d",
+    "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
+    # Shared with the ephys pipeline and deliberately NOT absorbed here. It
+    # declares no aind-data-schema constraint at all, so it does not fight
+    # ==2.8.1, and its pyproject is byte-identical between 0.2.6 and 0.2.8.
+    #
+    # 0.2.8 is the FIRST release whose create_base_nwb_file can read a v2
+    # acquisition.json -- verified 2026-07-30 by diffing that one consumed
+    # symbol across tags. 0.2.6/0.2.7 read `session_metadata
+    # ["session_start_time"]` unconditionally (KeyError on a v2 file; the
+    # `acquisition_start_time` dispatch arrives in 0.2.8 via #55) AND require
+    # a processing.json in the metadata directory, raising
+    # `ValueError("Missing metadata file: ")` -- with the filename omitted --
+    # when it is absent; 0.2.8 makes it conditional via #60. The capsule image
+    # pinned 0.1.6, which predates every v2 read.
+    "aind-nwb-utils==0.2.8",
+    # SyncDataset, for the multiplane 2p_vsync rising-edge extraction.
+    "aind-behavior-utils==0.3.4",
+    # pynwb 4 is REQUIRED, not merely tolerated: aind-nwb-utils>=0.2.6 declares
+    # pynwb>=4.0.0, so the capsule image's pynwb==2.8.3 could never coexist
+    # with it. Verified 2026-07-30 on 4.1.0 that every symbol consumed here
+    # still exists (NWBFile, ImagingPlane, ImageSegmentation, OpticalChannel,
+    # RoiResponseSeries, DfOverF, Fluorescence, GrayscaleImage, Images,
+    # ImageSeries, TimeIntervals, load_namespaces, get_class) and that the
+    # ndx-aibs-behavior-ophys namespace still loads and round-trips.
+    "pynwb==4.1.0",
+    # hdmf is imported directly (nwb_builders.py:39 from hdmf.common import
+    # VectorData), so it is declared rather than relied on transitively.
+    "hdmf==6.1.0",
+    "hdmf-zarr==0.13.0",
+    "h5py==3.16.0",
+    # numpy is ranged, not pinned: the capsule image pinned 1.26.4, which has no
+    # cp312 wheel. Only elementwise ufuncs, argmax, zeros/arange and boolean
+    # indexing are consumed here, all unchanged across 1.26 -> 2.x.
+    "numpy==2.2.6",
+    # sparse is pinned. It is consumed for exactly one call --
+    # sparse.COO(coords, data, shape).todense() -- but an unpinned range
+    # resolves to 0.19.0 on 3.12, which requires numba 0.53.1 (no cp312 wheel)
+    # and fails to install outright. 0.17.0 resolves numba 0.66.0 and installs
+    # on 3.10 / 3.11 / 3.12.
+    "sparse==0.17.0",
+    "imageio==2.37.4",
+    "matplotlib==3.10.9",
+    "pandas==2.3.3",
+    "pydantic-settings==2.14.2",
+    "pytz==2026.3.post1",
 ]
 
 [dependency-groups]
@@ -34,7 +89,7 @@ dev = [
 where = ["src"]
 
 [tool.black]
-line-length = 79
+line-length = 100
 target_version = ['py310']
 exclude = '''
 
@@ -56,7 +111,12 @@ exclude = '''
 '''
 
 [tool.coverage.run]
-omit = ["*__init__*"]
+# nwb_builders.py is the heavy pynwb/hdmf object construction and job.py the
+# orchestration; both need real upstream HDF5 payloads plus a writable Zarr
+# store (a Code Ocean data run), so they are omitted rather than diluting the
+# gate to an average. The light modules -- settings / file_handling / qc /
+# utils -- are held at 100%.
+omit = ["*__init__*", "*/nwb_builders.py", "*/job.py"]
 source = ["aind_ophys_nwb_library", "tests"]
 
 [tool.coverage.report]
@@ -69,7 +129,7 @@ exclude_lines = [
 fail_under = 100
 
 [tool.isort]
-line_length = 79
+line_length = 100
 profile = "black"
 skip = [".conda", ".venv"]
 
