@@ -28,7 +28,7 @@ wheels = [
 
 [[package]]
 name = "aind-ophys-nwb-library"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "." }
 
 [package.dev-dependencies]
