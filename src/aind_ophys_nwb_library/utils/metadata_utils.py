@@ -49,6 +49,13 @@ _SEATTLE_TZ = pytz.timezone("America/Los_Angeles")
 CODE_URL = "https://github.com/AllenNeuralDynamics/aind-ophys-nwb/tree/main/code"
 PROCESS_NAME = "aind-ophys-nwb"
 
+#: ``DataProcess.name``. Set explicitly because the converter also uses
+#: ``ProcessName.FILE_FORMAT_CONVERSION``, so both would otherwise derive the
+#: same default name ("File format conversion") and the run-level aggregator
+#: rejects a merged document with duplicate process names. Both capsules run
+#: once per session, so a plane id cannot separate them.
+DATA_PROCESS_NAME = "NWB packaging"
+
 #: Unit assumed when the acquisition metadata omits a length unit.
 DEFAULT_LENGTH_UNIT = "micrometer"
 
@@ -669,6 +676,7 @@ def build_data_process(
     )
     return shared_processing.build_data_process(
         process_type=ProcessName.FILE_FORMAT_CONVERSION,
+        name=DATA_PROCESS_NAME,
         code=code,
         start_time=start_time.astimezone(_SEATTLE_TZ),
         end_time=end_time.astimezone(_SEATTLE_TZ),
