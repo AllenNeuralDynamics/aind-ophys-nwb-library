@@ -735,7 +735,13 @@ def _add_traces(
         region = plane_segmentation.create_roi_table_region(
             region=list(range(num_rois)), description="List of measured ROIs"
         )
-        return RoiResponseSeries(name=name, data=data.T, rois=region, unit=unit, **timing)
+        local_timing = dict(timing)
+        ts = local_timing.get("timestamps")
+        # Debug-mode movies are truncated upstream of this trace file but the
+        # sync-derived timestamps are not, so the two lengths can disagree.
+        if ts is not None and len(ts) != data.shape[1]:
+            local_timing["timestamps"] = ts[: data.shape[1]]
+        return RoiResponseSeries(name=name, data=data.T, rois=region, unit=unit, **local_timing)
 
     roi = load_dataset(artifacts.extraction_h5, "roi", "traces")
     module.add(
