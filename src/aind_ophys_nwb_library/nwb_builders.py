@@ -22,25 +22,22 @@ Coverage-omitted (see pyproject): it needs real HDF5 payloads and a writable
 Zarr store, i.e. a Code Ocean data run.
 """
 
-import fnmatch
 import json
 import logging
-import os
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pynwb
 import sparse
 from hdmf.common import VectorData
 from hdmf_zarr import NWBZarrIO
 from pynwb import NWBFile
 from pynwb.epoch import TimeIntervals
-from pynwb.image import GrayscaleImage, Images, ImageSeries
+from pynwb.image import GrayscaleImage, Images
 from pynwb.ophys import (
     DfOverF,
     Fluorescence,
@@ -990,80 +987,6 @@ def add_epoch_intervals(
             stimulus_name=name,
         )
     nwbfile.add_time_intervals(table)
-    return nwbfile
-
-
-def add_tiffs(
-    nwbfile: NWBFile,
-    directory: Union[str, Path],
-    suffix: str,
-) -> NWBFile:
-    """Add the TIFF frames listed in a sibling CSV as an ImageSeries.
-
-    Parameters
-    ----------
-    nwbfile : NWBFile
-        The file being built.
-    directory : str or Path
-        Directory holding the matching ``*{suffix}*.tif`` and ``*{suffix}*.csv``
-        files.
-    suffix : str
-        Substring identifying the TIFF/CSV pair.
-
-    Returns
-    -------
-    NWBFile
-        The updated file; unchanged when the CSV lacks the expected columns.
-
-    Raises
-    ------
-    FileNotFoundError
-        If no TIFF or no CSV matches ``suffix``, naming the pattern and the
-        directory.
-    """
-    import imageio
-
-    names = sorted(os.listdir(directory))
-    tiffs = [n for n in names if fnmatch.fnmatch(n, f"*{suffix}*.tif")]
-    csvs = [n for n in names if fnmatch.fnmatch(n, f"*{suffix}*.csv")]
-    if not tiffs:
-        raise FileNotFoundError(f"No '*{suffix}*.tif' found in {directory}")
-    if not csvs:
-        raise FileNotFoundError(f"No '*{suffix}*.csv' found in {directory}")
-
-    frames = pd.read_csv(Path(directory) / csvs[0])
-    if "frameNumber" not in frames.columns or "timestamp" not in frames.columns:
-        logger.warning(
-            "%s has columns %s, expected frameNumber and timestamp; skipping "
-            "the %s ImageSeries.",
-            csvs[0],
-            list(frames.columns),
-            suffix,
-        )
-        return nwbfile
-    wanted = dict(zip(frames["frameNumber"], frames["timestamp"]))
-
-    images, timestamps = [], []
-    for name in tiffs:
-        reader = imageio.get_reader(Path(directory) / name)
-        for index, frame in enumerate(reader):
-            if index in wanted:
-                images.append(frame)
-                timestamps.append(wanted[index])
-    if not images:
-        raise FileNotFoundError(
-            f"None of the frames listed in {csvs[0]} were found in the "
-            f"'*{suffix}*.tif' files under {directory}"
-        )
-    nwbfile.add_acquisition(
-        ImageSeries(
-            name=f"image_series_{suffix}",
-            data=images,
-            unit="pixels",
-            format="raw",
-            timestamps=timestamps,
-        )
-    )
     return nwbfile
 
 
