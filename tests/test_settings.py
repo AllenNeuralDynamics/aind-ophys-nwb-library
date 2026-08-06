@@ -75,6 +75,28 @@ class TestNwbSettingsDefaults(unittest.TestCase):
         self.assertTrue(settings.verify)
 
 
+class TestRecordedParameters(unittest.TestCase):
+    """What reaches Code.parameters must outlive the task that ran it."""
+
+    def test_ephemeral_namespace_path_is_reduced_to_a_basename(self):
+        """A Nextflow task scratch path means nothing once the task ends."""
+        settings = _make_settings(
+            ["--extension_namespace=/tmp/nxf.abc123/capsule/code/ndx.namespace.yaml"]
+        )
+        self.assertEqual(
+            settings.recorded_parameters()["extension_namespace"],
+            "ndx.namespace.yaml",
+        )
+
+    def test_every_other_field_is_recorded_unchanged(self):
+        """Only the one path field is rewritten."""
+        settings = _make_settings()
+        recorded = settings.recorded_parameters()
+        self.assertEqual(recorded["input_dir"], "/data")
+        self.assertEqual(recorded["nwb_name"], "pophys.nwb.zarr")
+        self.assertEqual(set(recorded), set(NwbSettings.model_fields))
+
+
 class TestSampleCliValue(unittest.TestCase):
     """The helper the app-panel contract test drives every field with."""
 

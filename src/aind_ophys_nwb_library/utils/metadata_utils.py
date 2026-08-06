@@ -20,14 +20,11 @@ Two invariants shape the design:
 """
 
 import logging
-import os
 from dataclasses import dataclass
-from datetime import datetime as dt
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
-import pytz
 from aind_data_schema.components.configs import (
     ImagingConfig,
     LaserConfig,
@@ -35,19 +32,25 @@ from aind_data_schema.components.configs import (
     PlanarImageStack,
 )
 from aind_data_schema.components.coordinates import Scale
-from aind_data_schema.core.processing import DataProcess, Processing
-from aind_data_schema_models.process_names import ProcessName
+from aind_data_schema.components.identifiers import Code, DataAsset
 from aind_pophys_metadata import fields, io
 from aind_pophys_metadata import processing as shared_processing
+from aind_pophys_metadata.fields import _as_int
+from aind_pophys_metadata.paths import find_one
 
-from aind_ophys_nwb_library import __version__
 
 logger = logging.getLogger(__name__)
 
-_SEATTLE_TZ = pytz.timezone("America/Los_Angeles")
-
-CODE_URL = "https://github.com/AllenNeuralDynamics/aind-ophys-nwb/tree/main/code"
+#: Landing page of the capsule wrapper this library is deployed as. No
+#: ``/tree/main/code`` suffix and no branch ref: the shape every v2 capsule
+#: records, so one URL identifies the repository rather than a moving ref.
 PROCESS_NAME = "aind-ophys-nwb"
+
+#: Distribution name of this backing library, used by the shared builder to
+#: resolve a version from installed package metadata when none is supplied.
+LIBRARY_NAME = "aind-ophys-nwb-library"
+
+PROCEDURES_FILE = "procedures.json"
 
 #: ``DataProcess.name``. Set explicitly because the converter also uses
 #: ``ProcessName.FILE_FORMAT_CONVERSION``, so both would otherwise derive the
@@ -168,23 +171,6 @@ def _as_float(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         logger.warning("Ignoring non-numeric metadata value %r", value)
         return None
-
-
-def _as_int(value: Any) -> Optional[int]:
-    """Coerce a raw metadata value to int, or return ``None``.
-
-    Parameters
-    ----------
-    value : Any
-        Raw value from the metadata dict.
-
-    Returns
-    -------
-    int or None
-        The coerced value, or ``None`` when absent or uncoercible.
-    """
-    number = _as_float(value)
-    return None if number is None else int(number)
 
 
 def _imaging_configs(acquisition: dict) -> List[dict]:
@@ -568,18 +554,12 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
         can be resolved, or if no frame rate can be resolved from any source.
     """
     raw_dir = Path(raw_dir)
-    core_path = io.find_acquisition_file(raw_dir)
-    version = io.detect_schema_version(core_path)
-    core_raw = io.load_json(core_path)
-
-    platform_path = io.find(raw_dir, "platform.json")
-    platform_raw = io.load_json(platform_path) if platform_path else None
-    subject_path = io.find(raw_dir, "subject.json")
-    subject_raw = io.load_json(subject_path) if subject_path else None
-    procedures_path = io.find(raw_dir, "procedures.json")
+    common = io.load_common(raw_dir)
+    core_path = common.core_path
+    version = common.version
+    core_raw = common.core_raw
+    procedures_path = find_one(raw_dir, PROCEDURES_FILE, required=False)
     procedures_raw = io.load_json(procedures_path) if procedures_path else None
-    dd_path = io.find(raw_dir, "data_description.json")
-    dd_raw = io.load_json(dd_path) if dd_path else None
 
     records = plane_records_v1(core_raw) if version == io.SCHEMA_V1 else plane_records_v2(core_raw)
     if not records:
@@ -589,14 +569,19 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
         )
     planes = attach_plane_ids(records, fields.get_fov_ids(version, core_raw))
 
-    frame_rate = fields.get_frame_rate(version, core_raw, platform_raw)
-    if frame_rate is None:
-        raise ValueError(
-            f"No frame rate found in {core_path.name} (schema {version}) or "
-            f"platform.json under {raw_dir}; every NWB imaging plane needs an "
-            "imaging_rate."
-        )
+    # Validated here rather than ~150 lines later in job.py: every NWB imaging
+    # plane needs an imaging_rate, so an asset without one cannot be packaged
+    # at all and should fail at load, naming the file and schema version.
+    frame_rate = fields.resolve_frame_rate(
+        version,
+        core_raw,
+        common.platform_raw,
+        core_file=core_path,
+        input_dir=raw_dir,
+        required=True,
+    )
 
+    subject_raw = common.subject_raw
     genotype = (subject_raw or {}).get("genotype")
     indicator = get_injection_material(procedures_raw) or genotype
     return NwbMetadata(
@@ -610,101 +595,52 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
         indicator=indicator,
         genotype=genotype,
         subject_id=fields.get_subject_id(core_raw, subject_raw),
-        dataset_name=fields.get_dataset_name(dd_raw),
+        dataset_name=fields.get_dataset_name(common.data_description_raw),
     )
 
 
-def code_version() -> str:
-    """Return the version recorded on the ``Code`` block.
+def build_nwb_code(parameters: dict) -> Code:
+    """Construct the v2 ``Code`` block for NWB packaging.
 
-    aind-data-schema warns when a ``Code`` carries neither ``commit_hash`` nor
-    ``version``, and says it will require one in future. The library version is
-    the fallback rather than the empty string a bare
-    ``os.getenv("VERSION", "")`` yields wherever the capsule image does not set
-    ``VERSION``. Only one of the two may be set, and the shared builder takes
-    ``version``.
-
-    Returns
-    -------
-    str
-        The ``VERSION`` environment value, or this library's version.
-    """
-    return os.getenv("VERSION") or __version__
-
-
-def build_data_process(
-    parameters: dict,
-    start_time: dt,
-    end_time: dt,
-    input_data: Optional[List[str]] = None,
-    output_path: Optional[str] = None,
-    output_parameters: Optional[Dict[str, Any]] = None,
-    error: Optional[BaseException] = None,
-) -> DataProcess:
-    """Construct the v2 DataProcess for NWB packaging.
+    ``input_data`` is not set here: the upstream artifacts are only resolved
+    once the run is under way, while the code block must exist before it so
+    that a failure still yields a ``processing.json``. Attach them later with
+    :func:`attach_input_data`.
 
     Parameters
     ----------
     parameters : dict
         Resolved run parameters recorded on the code block.
-    start_time : dt
-        Processing start time.
-    end_time : dt
-        Processing end time.
-    input_data : list of str, optional
-        Input artifact path(s)/asset name(s) for provenance.
-    output_path : str, optional
-        Path to this process's output directory, relative to the results root.
-    output_parameters : dict, optional
-        Actual parameters used and output metrics.
-    error : Exception, optional
-        The exception that terminated the run, or ``None`` on success. Its
-        message is recorded in ``notes``.
 
     Returns
     -------
-    DataProcess
-        The populated NWB-packaging data process.
+    Code
+        The populated code block.
     """
-    notes = None if error is None else f"Run failed with {type(error).__name__}: {error}"
-    code = shared_processing.build_code(
-        url=CODE_URL,
+    return shared_processing.build_code(
         name=PROCESS_NAME,
-        version=code_version(),
+        library_name=LIBRARY_NAME,
         parameters=parameters,
-        input_data=input_data,
-    )
-    return shared_processing.build_data_process(
-        process_type=ProcessName.FILE_FORMAT_CONVERSION,
-        name=DATA_PROCESS_NAME,
-        code=code,
-        start_time=start_time.astimezone(_SEATTLE_TZ),
-        end_time=end_time.astimezone(_SEATTLE_TZ),
-        output_path=output_path,
-        output_parameters=output_parameters,
-        notes=notes,
-        resources=shared_processing.resource_usage(),
     )
 
 
-def build_processing(data_processes: List[DataProcess]) -> Processing:
-    """Wrap data processes into a full v2 Processing object."""
-    return shared_processing.build_processing(data_processes)
+def attach_input_data(code: Code, input_data: List[str]) -> None:
+    """Record resolved input artifacts on an already-built ``Code``.
 
-
-def write_processing_json(processing: Processing, output_dir: Path) -> Path:
-    """Serialize a Processing object to ``processing.json``.
+    The same ephemeral-path rejection :func:`build_code` applies is repeated
+    here, since this bypasses it.
 
     Parameters
     ----------
-    processing : Processing
-        The processing document to write.
-    output_dir : Path
-        Directory into which ``processing.json`` is written.
+    code : Code
+        The code block to populate.
+    input_data : list of str
+        Input artifact path(s)/asset name(s), relative to their mount root.
 
-    Returns
-    -------
-    Path
-        The path written.
+    Raises
+    ------
+    ValueError
+        If any entry is a Nextflow task scratch path.
     """
-    return shared_processing.write_processing_json(processing, output_dir)
+    shared_processing.reject_ephemeral_paths(list(input_data), "input_data")
+    code.input_data = [DataAsset(name=name) for name in input_data]

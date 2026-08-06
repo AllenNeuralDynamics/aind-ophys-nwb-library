@@ -4,12 +4,14 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime as dt
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
 
-from aind_data_schema.core.processing import DataProcess, Processing
+from aind_data_schema.core.processing import Processing
 from aind_data_schema_models.process_names import ProcessName
+from aind_pophys_metadata import fields as shared_fields
+from aind_pophys_metadata.runner import stage_guard
 
 from aind_ophys_nwb_library.utils import metadata_utils as mu
 from tests import fixtures
@@ -44,11 +46,12 @@ class TestCoercion(unittest.TestCase):
         with self.assertLogs(mu.logger, level="WARNING"):
             self.assertIsNone(mu._as_float("not-a-number"))
 
-    def test_int_coercion(self):
-        """Ints coerce through float so "0.0" and 0 both work."""
+    def test_int_coercion_comes_from_the_shared_layer(self):
+        """The shared coercion tolerates an explicit JSON null."""
         self.assertEqual(mu._as_int("3"), 3)
         self.assertEqual(mu._as_int(4.0), 4)
         self.assertIsNone(mu._as_int(None))
+        self.assertIs(mu._as_int, shared_fields._as_int)
 
 
 class TestPlaneMetadata(unittest.TestCase):
@@ -434,95 +437,119 @@ class TestLoadNwbMetadata(unittest.TestCase):
         self.assertEqual(metadata.subject_id, fixtures.SUBJECT_ID)
 
 
-class TestProcessingBuilders(unittest.TestCase):
-    """processing.json construction."""
+class TestCodeBlock(unittest.TestCase):
+    """The Code block identifying which artifact produced the NWB."""
 
-    def _data_process(self, **kwargs) -> DataProcess:
-        """Build a DataProcess with sensible defaults for the test."""
-        defaults = dict(
-            parameters={"input_dir": "/data"},
-            start_time=dt(2026, 7, 30, 12, 0, 0),
-            end_time=dt(2026, 7, 30, 12, 5, 0),
+    def test_url_is_the_library_landing_page(self):
+        """No /tree/main/code suffix and no branch ref."""
+        code = mu.build_nwb_code({"input_dir": "/data"})
+        self.assertEqual(
+            code.url,
+            f"https://github.com/AllenNeuralDynamics/{mu.LIBRARY_NAME}",
         )
-        defaults.update(kwargs)
-        return mu.build_data_process(**defaults)
 
-    def test_process_type_is_file_format_conversion(self):
-        """NWB packaging is a file-format conversion in the v2 enum."""
-        process = self._data_process()
-        self.assertEqual(process.process_type, ProcessName.FILE_FORMAT_CONVERSION)
+    def test_version_is_non_empty(self):
+        """An empty version leaves the step with no code identity at all."""
+        self.assertTrue(mu.build_nwb_code({}).version)
 
-    def test_name_is_derived_not_none(self):
-        """DataProcess.name is derived from process_type, never passed None."""
-        self.assertTrue(self._data_process().name)
-
-    def test_experimenters_defaults_to_empty_list(self):
-        """experimenters is a list of PEOPLE, so an institution is wrong."""
-        self.assertEqual(self._data_process().experimenters, [])
+    def test_version_ignores_the_capsule_environment(self):
+        """The backing library is authoritative, not the wrapper's VERSION."""
+        with patch.dict(os.environ, {"VERSION": "1.2.3"}, clear=True):
+            code = mu.build_nwb_code({})
+        self.assertNotEqual(code.version, "1.2.3")
+        self.assertEqual(code.version, version(mu.LIBRARY_NAME))
 
     def test_parameters_round_trip_through_generic_model(self):
         """Code.parameters becomes a _GenericModel, read back via model_dump."""
-        process = self._data_process(parameters={"num_planes": 2})
-        self.assertEqual(process.code.parameters.model_dump()["num_planes"], 2)
+        code = mu.build_nwb_code({"num_planes": 2})
+        self.assertEqual(code.parameters.model_dump()["num_planes"], 2)
 
-    def test_output_path_and_input_data(self):
-        """Provenance fields are populated, not left to the schema default."""
-        process = self._data_process(
-            input_data=["VISp_0/extraction/VISp_0_extraction.h5"],
-            output_path="nwb",
+    def test_ephemeral_parameter_path_is_rejected(self):
+        """A Nextflow task scratch path must never reach permanent metadata."""
+        with self.assertRaises(ValueError):
+            mu.build_nwb_code({"extension_namespace": "/tmp/nxf.abc/capsule/code/ext.yaml"})
+
+
+class TestAttachInputData(unittest.TestCase):
+    """Input provenance, resolved after the code block already exists."""
+
+    def test_names_are_wrapped_as_data_assets(self):
+        """Each resolved artifact becomes one DataAsset name."""
+        code = mu.build_nwb_code({})
+        mu.attach_input_data(code, ["VISp_0/extraction/VISp_0_extraction.h5"])
+        self.assertEqual(
+            [asset.name for asset in code.input_data],
+            ["VISp_0/extraction/VISp_0_extraction.h5"],
         )
-        self.assertEqual(str(process.output_path), "nwb")
-        self.assertEqual(process.code.input_data[0].name, "VISp_0/extraction/VISp_0_extraction.h5")
 
-    def test_error_is_recorded_in_notes(self):
-        """A failed run still describes what went wrong."""
-        process = self._data_process(error=RuntimeError("boom"))
-        self.assertIn("RuntimeError", process.notes)
-        self.assertIn("boom", process.notes)
+    def test_ephemeral_path_is_rejected(self):
+        """The guard build_code applies is not bypassed by attaching later."""
+        code = mu.build_nwb_code({})
+        with self.assertRaises(ValueError):
+            mu.attach_input_data(code, ["/tmp/nxf.abc/capsule/results/x.h5"])
 
-    def test_resources_are_recorded(self):
-        """ResourceUsage is attached by the shared builder."""
-        self.assertIsNotNone(self._data_process().resources)
 
-    def test_pipelines_omitted_without_the_environment(self):
-        """No PIPELINE_* env means both pipelines and pipeline_name are absent."""
-        with patch.dict(os.environ, {}, clear=True):
-            process = self._data_process()
-            processing = mu.build_processing([process])
-        self.assertIsNone(processing.pipelines)
-        self.assertIsNone(process.pipeline_name)
+class TestStageDocument(unittest.TestCase):
+    """The processing.json the shared stage guard writes for this capsule."""
 
-    def test_pipelines_and_pipeline_name_written_together(self):
-        """The schema validates pipeline_name against pipelines, so both set."""
-        env = {
-            "PIPELINE_NAME": "aind-pophys-pipeline",
-            "PIPELINE_URL": "https://github.com/AllenNeuralDynamics/aind-pophys-pipeline",
-            "PIPELINE_VERSION": "2.0.0",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            process = self._data_process()
-            processing = mu.build_processing([process])
-        self.assertEqual(process.pipeline_name, "aind-pophys-pipeline")
-        self.assertEqual(processing.pipelines[0].name, "aind-pophys-pipeline")
+    def _run_stage(self, output_dir: Path, upstream_names=None) -> Processing:
+        """Drive one stage through the guard and read the document back."""
+        code = mu.build_nwb_code({"input_dir": "/data"})
+        with stage_guard(
+            output_dir,
+            ProcessName.FILE_FORMAT_CONVERSION,
+            code,
+            name=mu.DATA_PROCESS_NAME,
+            output_path="nwb",
+        ) as ctx:
+            ctx.upstream_names = list(upstream_names or [])
+            ctx.output_parameters["num_planes"] = 2
+        return Processing.model_validate_json((output_dir / "processing.json").read_text())
 
-    def test_partial_pipeline_environment_raises(self):
-        """A misconfigured pipeline fails loudly rather than half-populating."""
-        with patch.dict(os.environ, {"PIPELINE_NAME": "x"}, clear=True):
-            with self.assertRaises(ValueError):
-                mu.build_processing([self._data_process()])
-
-    def test_write_and_round_trip(self):
+    def test_document_round_trips(self):
         """The written file validates back into a core v2 Processing."""
         with patch.dict(os.environ, {}, clear=True):
-            processing = mu.build_processing([self._data_process(output_path="nwb")])
-        with tempfile.TemporaryDirectory() as tmp:
-            written = mu.write_processing_json(processing, Path(tmp))
-            self.assertTrue(written.exists())
-            reloaded = Processing.model_validate_json(written.read_text())
+            with tempfile.TemporaryDirectory() as tmp:
+                processing = self._run_stage(Path(tmp))
+        process = processing.data_processes[0]
+        self.assertEqual(process.process_type, ProcessName.FILE_FORMAT_CONVERSION)
+        self.assertEqual(process.name, mu.DATA_PROCESS_NAME)
+        self.assertEqual(str(process.output_path), "nwb")
+        self.assertEqual(process.experimenters, [])
+        self.assertIsNotNone(process.resources)
+
+    def test_name_does_not_collide_with_the_converter(self):
+        """Both capsules use FILE_FORMAT_CONVERSION and run once per session."""
+        self.assertNotEqual(mu.DATA_PROCESS_NAME, ProcessName.FILE_FORMAT_CONVERSION.value)
+
+    def test_upstream_names_become_dependency_graph_edges(self):
+        """Upstream processes are flat siblings under this process's name."""
+        with patch.dict(os.environ, {}, clear=True):
+            with tempfile.TemporaryDirectory() as tmp:
+                processing = self._run_stage(Path(tmp), ["VISp_0: dF/F estimation"])
         self.assertEqual(
-            reloaded.data_processes[0].process_type,
-            ProcessName.FILE_FORMAT_CONVERSION,
+            processing.dependency_graph,
+            {mu.DATA_PROCESS_NAME: ["VISp_0: dF/F estimation"]},
         )
+
+    def test_document_is_written_even_when_the_stage_raises(self):
+        """A failed stage that leaves no metadata looks like one that never ran."""
+        code = mu.build_nwb_code({})
+        with patch.dict(os.environ, {}, clear=True):
+            with tempfile.TemporaryDirectory() as tmp:
+                output_dir = Path(tmp)
+                with self.assertRaises(RuntimeError):
+                    with stage_guard(
+                        output_dir,
+                        ProcessName.FILE_FORMAT_CONVERSION,
+                        code,
+                        name=mu.DATA_PROCESS_NAME,
+                    ):
+                        raise RuntimeError("boom")
+                processing = Processing.model_validate_json(
+                    (output_dir / "processing.json").read_text()
+                )
+        self.assertIn("boom", processing.data_processes[0].notes)
 
 
 if __name__ == "__main__":

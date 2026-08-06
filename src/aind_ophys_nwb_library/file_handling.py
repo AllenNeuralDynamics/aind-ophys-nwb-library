@@ -12,14 +12,16 @@ kept the ``<plane_id>_`` filename prefix, so a recursive glob keyed on that
 prefix still resolves every artifact -- which is why this module globs
 recursively on the filename rather than walking a fixed directory layout.
 
-Kept import-light (stdlib only): every function here is pure path logic, so
-the upstream contract stays testable without pynwb or real HDF5 payloads.
+Kept import-light: every function here is pure path logic, so the upstream
+contract stays testable without pynwb or real HDF5 payloads.
 """
 
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+from aind_pophys_metadata.paths import find_one
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +273,7 @@ def find_epoch_locations(search_root: Path) -> Optional[Path]:
     Path or None
         The first match, or ``None`` when the session has no epochs.
     """
-    return next(iter(sorted(Path(search_root).rglob(EPOCH_LOCATIONS_JSON))), None)
+    return find_one(search_root, EPOCH_LOCATIONS_JSON, required=False)
 
 
 def find_sync_file(raw_root: Path) -> Optional[Path]:
@@ -293,7 +295,7 @@ def find_sync_file(raw_root: Path) -> Optional[Path]:
     """
     patterns = ("*pophys/data_main.h5", "behavior/*.h5", "*ophys/*.h5")
     for pattern in patterns:
-        match = next(iter(sorted(Path(raw_root).rglob(pattern))), None)
+        match = find_one(raw_root, pattern, required=False)
         if match is not None:
             return match
     logger.error(

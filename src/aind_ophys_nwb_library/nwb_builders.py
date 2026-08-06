@@ -739,7 +739,21 @@ def _add_traces(
         ts = local_timing.get("timestamps")
         # Debug-mode movies are truncated upstream of this trace file but the
         # sync-derived timestamps are not, so the two lengths can disagree.
+        # The trace length is authoritative, and every upstream cap is a head
+        # slice, so the head of the timestamp vector is the matching window.
+        # Outside a debug run a mismatch is a genuine correctness signal, so
+        # it is never trimmed silently.
         if ts is not None and len(ts) != data.shape[1]:
+            logger.warning(
+                "%s for %s has %s samples but %s sync timestamps; trimming "
+                "timestamps to the trace length. Expected only for a "
+                "debug-truncated movie -- otherwise the movie and the sync "
+                "record disagree.",
+                name,
+                artifacts.plane_id,
+                data.shape[1],
+                len(ts),
+            )
             local_timing["timestamps"] = ts[: data.shape[1]]
         return RoiResponseSeries(name=name, data=data.T, rois=region, unit=unit, **local_timing)
 

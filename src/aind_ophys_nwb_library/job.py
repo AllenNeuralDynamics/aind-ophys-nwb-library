@@ -15,24 +15,27 @@ also matches the ``<subdir>/<step>`` shape every other v2 capsule adopted.
 There is exactly **one** ``processing.json`` and **one**
 ``quality_control.json`` per run, not one per plane: ``main.nf`` calls this
 capsule once with every upstream channel ``.collect()``ed, so a run produces a
-single NWB file describing all planes. ``processing.json`` is written from a
-``finally`` block so a failed run still leaves a document describing what was
-attempted, with the error in ``notes``.
+single NWB file describing all planes. ``processing.json`` is written by the
+shared ``stage_guard``, which times the stage and emits a document whether or
+not the body raised, with the error in ``notes``.
 """
 
 import logging
-from datetime import datetime as dt
 from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
+from aind_data_schema.components.identifiers import Code
+from aind_data_schema_models.process_names import ProcessName
+from aind_pophys_metadata.paths import relative_to_root
+from aind_pophys_metadata.processing import collect_upstream_process_names
+from aind_pophys_metadata.runner import StageContext, stage_guard
 from log_schema.main import setup_logging
 
 from . import file_handling, nwb_builders, qc
 from .settings import NwbSettings
 from .utils import metadata_utils as mu
 from .utils.metadata_utils import SessionType
-from .utils.paths import relative_to_root
 
 logger = logging.getLogger("Ophys NWB packaging")
 
@@ -149,63 +152,34 @@ def _plane_timestamps(
     return nwb_builders.sync_timestamps_per_plane(metadata.planes, _sync_rising_edges(sync_file))
 
 
-def _write_processing_metadata(
-    settings: NwbSettings,
-    ctx: dict,
-    start_time: dt,
-    error: Optional[BaseException],
-) -> None:
-    """Best-effort writer for processing.json. Never raises.
-
-    A failure here must not mask a run failure already propagating out of
-    ``run()``.
-    """
-    results_root = settings.output_dir.resolve()
-    output_dir = ctx.get("output_dir") or (results_root / NWB_SUBDIR)
-    try:
-        data_process = mu.build_data_process(
-            parameters=ctx.get("parameters") or settings.model_dump(mode="json"),
-            start_time=start_time,
-            end_time=dt.now(),
-            input_data=ctx.get("input_data"),
-            output_path=relative_to_root(results_root, output_dir),
-            output_parameters=ctx.get("output_parameters"),
-            error=error,
-        )
-        mu.write_processing_json(mu.build_processing([data_process]), output_dir)
-    except Exception as proc_exc:
-        logger.error(f"processing.json write failed (non-fatal): {proc_exc}")
-
-
 def _package_session(
     settings: NwbSettings,
     metadata: mu.NwbMetadata,
     raw_dir: Path,
     processed_dir: Path,
-    ctx: dict,
+    output_dir: Path,
+    code: Code,
+    ctx: StageContext,
 ) -> None:
     """Build and write the NWB file plus its quality_control.json.
 
-    ``ctx`` is populated as the run progresses so the ``processing.json``
-    writer in ``run()``'s ``finally`` can report partial provenance even when
-    this raises.
+    ``code`` and ``ctx`` are populated as the run progresses so the
+    ``processing.json`` the stage guard writes reports partial provenance even
+    when this raises.
     """
     import aind_nwb_utils.utils as nwb_utils
 
     results_root = settings.output_dir.resolve()
-    output_dir = results_root / NWB_SUBDIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ctx["output_dir"] = output_dir
-    ctx["parameters"] = settings.model_dump(mode="json")
 
     epoch_json = file_handling.find_epoch_locations(processed_dir)
     session = mu.session_type(len(metadata.planes), epoch_json is not None)
     logger.info("Detected session type %s", session.value)
 
     artifacts = file_handling.collect_session_artifacts(processed_dir, metadata.plane_ids)
-    ctx["input_data"] = [
-        relative_to_root(processed_dir, plane.extraction_h5) for plane in artifacts
-    ]
+    mu.attach_input_data(
+        code,
+        [relative_to_root(processed_dir, plane.extraction_h5) for plane in artifacts],
+    )
 
     # create_base_nwb_file reads the core files from one directory (not
     # recursively), and dispatches session.json vs acquisition.json itself.
@@ -245,13 +219,18 @@ def _package_session(
     metrics.append(qc.build_nwb_review_metric(nwb_reference))
     qc.write_quality_control_json(qc.build_quality_control(metrics), output_dir)
 
-    ctx["output_parameters"] = {
-        "session_type": session.value,
-        "num_planes": len(metadata.planes),
-        "num_rois": total_rois,
-        "nwb_path": nwb_reference,
-        "nwb_reopened": readable,
-    }
+    # Scalar summary statistics describing THIS step's outputs, so a reviewer
+    # can triage the run without opening the NWB store. Input parameters
+    # belong on the code block, never here.
+    ctx.output_parameters.update(
+        {
+            "session_type": session.value,
+            "num_planes": len(metadata.planes),
+            "num_rois": total_rois,
+            "nwb_path": nwb_reference,
+            "nwb_reopened": readable,
+        }
+    )
 
 
 def _reopened(nwb_path: Path, plane_ids) -> bool:
@@ -292,7 +271,6 @@ def run(settings: Optional[NwbSettings] = None) -> None:
         through the core v2 schema objects after writing.
     """
     settings = settings or NwbSettings()
-    start_time = dt.now()
 
     raw_dir = _resolve_mount(settings.input_dir, settings.raw_subdir)
     processed_dir = _resolve_mount(settings.input_dir, settings.processed_subdir)
@@ -305,24 +283,27 @@ def run(settings: Optional[NwbSettings] = None) -> None:
             "process_name": PROCESS_NAME,
         },
     )
-    logger.info(
-        "Starting NWB packaging for %s plane(s)",
-        len(metadata.planes),
-        extra={"event_type": "stage_start"},
-    )
+    logger.info("Packaging %s plane(s)", len(metadata.planes))
 
-    ctx: dict = {}
-    run_error: Optional[BaseException] = None
-    try:
-        _package_session(settings, metadata, raw_dir, processed_dir, ctx)
-        logger.info("NWB packaging complete", extra={"event_type": "stage_complete"})
-    except BaseException as exc:
-        run_error = exc
-        logger.error("NWB packaging failed", extra={"event_type": "stage_error"})
-        logger.exception("Unhandled exception")
-        raise
-    finally:
-        _write_processing_metadata(settings, ctx, start_time, run_error)
+    results_root = settings.output_dir.resolve()
+    output_dir = results_root / NWB_SUBDIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    code = mu.build_nwb_code(settings.recorded_parameters())
+
+    with stage_guard(
+        output_dir,
+        ProcessName.FILE_FORMAT_CONVERSION,
+        code,
+        logger=logger,
+        name=mu.DATA_PROCESS_NAME,
+        output_path=relative_to_root(results_root, output_dir),
+    ) as ctx:
+        # Every upstream processing.json staged into this task is a flat
+        # sibling dependency: no ordering, no parent/grandparent distinction.
+        ctx.upstream_names = collect_upstream_process_names(
+            processed_dir, exclude=mu.DATA_PROCESS_NAME
+        )
+        _package_session(settings, metadata, raw_dir, processed_dir, output_dir, code, ctx)
 
     if settings.verify:
-        _verify_outputs(ctx["output_dir"])
+        _verify_outputs(output_dir)

@@ -23,14 +23,17 @@ readme = "README.md"
 version = "0.1.0"
 
 dependencies = [
-    "aind-data-schema==2.8.1",
-    "aind-data-schema-models==5.7.3",
-    "aind-qcportal-schema==0.6.4",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@59e84ce33cd932261a031fbe457291a91974ca55",
+    # The two pins move together: aind-data-schema 2.9.0 requires
+    # aind-data-schema-models >=6.1.0,<7, while 2.8.1 pinned ==5.7.3 exactly,
+    # so bumping either alone leaves the environment unresolvable.
+    "aind-data-schema==2.9.0",
+    "aind-data-schema-models==6.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@afcb367f71c3127173a1ae4357135a41901e0466",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     # Shared with the ephys pipeline and deliberately NOT absorbed here. It
     # declares no aind-data-schema constraint at all, so it does not fight
-    # ==2.8.1, and its pyproject is byte-identical between 0.2.6 and 0.2.8.
+    # the exact pin, and its pyproject is byte-identical between 0.2.6 and
+    # 0.2.8.
     #
     # 0.2.8 is the FIRST release whose create_base_nwb_file can read a v2
     # acquisition.json -- verified 2026-07-30 by diffing that one consumed

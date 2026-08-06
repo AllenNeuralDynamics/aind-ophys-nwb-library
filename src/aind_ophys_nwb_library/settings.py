@@ -20,6 +20,10 @@ from pydantic_settings import BaseSettings
 
 DEFAULT_EXTENSION_NAMESPACE = Path("ndx-aibs-behavior-ophys.namespace.yaml")
 
+#: Settings field whose value is a filesystem path that only exists for the
+#: lifetime of one task, so only its basename is recorded as provenance.
+EPHEMERAL_PATH_FIELD = "extension_namespace"
+
 
 class NwbSettings(BaseSettings, cli_parse_args=True):
     """Settings for NWB packaging using pydantic-settings."""
@@ -82,3 +86,23 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
             "store, after writing."
         ),
     )
+
+    def recorded_parameters(self) -> dict:
+        """Return the settings as recorded in ``Code.parameters``.
+
+        ``extension_namespace`` is reduced to its basename. In the pipeline
+        the capsule is handed the resolved YAML inside its Nextflow task
+        scratch directory (``/tmp/nxf.<run>/capsule/code/...``), a path that
+        is destroyed with the task, so recording it verbatim would put a
+        dangling absolute path into permanent metadata. The basename still
+        identifies which extension was loaded, which is the provenance that
+        matters.
+
+        Returns
+        -------
+        dict
+            JSON-serializable settings for the code block.
+        """
+        parameters = self.model_dump(mode="json")
+        parameters[EPHEMERAL_PATH_FIELD] = Path(getattr(self, EPHEMERAL_PATH_FIELD)).name
+        return parameters
