@@ -28,7 +28,7 @@ dependencies = [
     # so bumping either alone leaves the environment unresolvable.
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@b473a1e5288096c48e47d2bf03cb24d48ef46b50",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@adac8ebee57f895bb2d30b69cde01dd41afbce10",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     # Shared with the ephys pipeline and deliberately NOT absorbed here. It
     # declares no aind-data-schema constraint at all, so it does not fight
