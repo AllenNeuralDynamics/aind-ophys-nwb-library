@@ -7,10 +7,9 @@ and OASIS event detection at the same time.
 
 Each of those capsules writes ``<plane_id>/<step>/<plane_id>_<artifact>``
 under its results root, and the pipeline copies all of them into one
-``processed`` mount. The v2 restructuring changed the *directory* nesting but
-kept the ``<plane_id>_`` filename prefix, so a recursive glob keyed on that
-prefix still resolves every artifact -- which is why this module globs
-recursively on the filename rather than walking a fixed directory layout.
+``processed`` mount. v2 changed the *directory* nesting but kept the
+``<plane_id>_`` filename prefix, so this module globs recursively on the
+filename rather than walking a fixed directory layout.
 
 Kept import-light: every function here is pure path logic, so the upstream
 contract stays testable without pynwb or real HDF5 payloads.
@@ -21,18 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from aind_pophys_metadata.paths import find_one
+from aind_pophys_metadata import find_one
 
 logger = logging.getLogger(__name__)
 
 # Filename suffix of every upstream artifact the NWB builders actually read.
 #
-# Deliberately smaller than the v1 ``MULTIPLANE_FILE_PARTS``: that dict also
-# globbed ``processing.json``, ``params.json``, ``registered_metrics.json``,
-# ``motion_transform.csv`` and ``extract_traces.json``, none of which any NWB
-# builder ever consumed. Under v2 the first of those would also have become a
-# false positive (capsules now write an unprefixed ``processing.json``), so the
-# unconsumed entries are dropped rather than carried forward.
+# Only what is consumed is listed. Notably absent is ``processing.json``: v2
+# capsules write it unprefixed, so globbing for it would match every plane's
+# and no builder reads it anyway.
 ARTIFACT_PARTS: Dict[str, str] = {
     # aind-ophys-extraction -> <plane>/extraction/<plane>_extraction.h5
     "extraction_h5": "extraction.h5",
@@ -279,9 +275,9 @@ def find_epoch_locations(search_root: Path) -> Optional[Path]:
 def find_sync_file(raw_root: Path) -> Optional[Path]:
     """Locate the raw sync HDF5 file for a multiplane session.
 
-    Tried in the order the v1 capsule used, so a run that worked before still
-    resolves the same file: the single-plane ``pophys/data_main.h5``, then a
-    ``behavior/*.h5``, then any ``*ophys/*.h5``.
+    Patterns are tried in order -- ``*pophys/data_main.h5``, then
+    ``behavior/*.h5``, then any ``*ophys/*.h5`` -- matching the layout the
+    transfer service produces for each acquisition style.
 
     Parameters
     ----------

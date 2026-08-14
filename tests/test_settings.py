@@ -11,18 +11,19 @@ import sys
 import typing
 import unittest
 from pathlib import Path
+from typing import Any, Optional, Sequence
 from unittest.mock import patch
 
 from aind_ophys_nwb_library.settings import NwbSettings
 
 
-def _make_settings(argv=None, **kwargs):
+def _make_settings(argv: Optional[Sequence[str]] = None, **kwargs: Any) -> NwbSettings:
     """Construct NwbSettings with a controlled sys.argv."""
     with patch.object(sys, "argv", ["run_capsule.py"] + list(argv or [])):
         return NwbSettings(**kwargs)
 
 
-def _sample_cli_value(annotation) -> str:
+def _sample_cli_value(annotation: Any) -> str:
     """Return a valid ``--name=value`` payload for a field annotation."""
     origin = typing.get_origin(annotation)
     if origin is typing.Union:
@@ -42,7 +43,7 @@ def _sample_cli_value(annotation) -> str:
 class TestNwbSettingsDefaults(unittest.TestCase):
     """Default field values match the capsule's Code Ocean mounts."""
 
-    def test_defaults(self):
+    def test_defaults(self) -> None:
         """Defaults point at the standard capsule mounts."""
         settings = _make_settings()
         self.assertEqual(settings.input_dir, Path("/data"))
@@ -53,7 +54,7 @@ class TestNwbSettingsDefaults(unittest.TestCase):
         self.assertFalse(settings.skip_lab_metadata)
         self.assertFalse(settings.verify)
 
-    def test_extension_namespace_default_is_code_relative(self):
+    def test_extension_namespace_default_is_code_relative(self) -> None:
         """The extension YAML is resolved from the capsule's code/ folder."""
         settings = _make_settings()
         self.assertEqual(
@@ -62,14 +63,14 @@ class TestNwbSettingsDefaults(unittest.TestCase):
         )
         self.assertFalse(settings.extension_namespace.is_absolute())
 
-    def test_input_and_output_are_renamed_not_aliased(self):
+    def test_input_and_output_are_renamed_not_aliased(self) -> None:
         """The v1 argparse names are replaced, not carried as aliases."""
         self.assertIn("input_dir", NwbSettings.model_fields)
         self.assertIn("output_dir", NwbSettings.model_fields)
         self.assertNotIn("input_directory", NwbSettings.model_fields)
         self.assertNotIn("output_directory", NwbSettings.model_fields)
 
-    def test_bool_string_parsing(self):
+    def test_bool_string_parsing(self) -> None:
         """Bools parse from strings, which argparse's type=bool cannot do."""
         settings = _make_settings(["--verify=true"])
         self.assertTrue(settings.verify)
@@ -78,7 +79,7 @@ class TestNwbSettingsDefaults(unittest.TestCase):
 class TestRecordedParameters(unittest.TestCase):
     """What reaches Code.parameters must outlive the task that ran it."""
 
-    def test_ephemeral_namespace_path_is_reduced_to_a_basename(self):
+    def test_ephemeral_namespace_path_is_reduced_to_a_basename(self) -> None:
         """A Nextflow task scratch path means nothing once the task ends."""
         settings = _make_settings(
             ["--extension_namespace=/tmp/nxf.abc123/capsule/code/ndx.namespace.yaml"]
@@ -88,7 +89,7 @@ class TestRecordedParameters(unittest.TestCase):
             "ndx.namespace.yaml",
         )
 
-    def test_every_other_field_is_recorded_unchanged(self):
+    def test_every_other_field_is_recorded_unchanged(self) -> None:
         """Only the one path field is rewritten."""
         settings = _make_settings()
         recorded = settings.recorded_parameters()
@@ -100,7 +101,7 @@ class TestRecordedParameters(unittest.TestCase):
 class TestSampleCliValue(unittest.TestCase):
     """The helper the app-panel contract test drives every field with."""
 
-    def test_covers_every_annotation_this_settings_class_uses(self):
+    def test_covers_every_annotation_this_settings_class_uses(self) -> None:
         """Each supported annotation yields a parseable payload."""
         self.assertEqual(_sample_cli_value(bool), "true")
         self.assertEqual(_sample_cli_value(int), "2")
@@ -108,7 +109,7 @@ class TestSampleCliValue(unittest.TestCase):
         self.assertTrue(_sample_cli_value(Path).startswith("/"))
         self.assertEqual(_sample_cli_value(str), "sample")
 
-    def test_optional_unwraps_to_the_inner_type(self):
+    def test_optional_unwraps_to_the_inner_type(self) -> None:
         """Optional[float] is driven as a float, not as a string."""
         self.assertEqual(_sample_cli_value(typing.Optional[float]), "1.5")
 
@@ -116,12 +117,12 @@ class TestSampleCliValue(unittest.TestCase):
 class TestAppPanelContract(unittest.TestCase):
     """Every field must be drivable by a Code Ocean app panel."""
 
-    def test_no_single_character_field_names(self):
+    def test_no_single_character_field_names(self) -> None:
         """No field name is one character long."""
         offenders = [name for name in NwbSettings.model_fields if len(name) == 1]
         self.assertEqual(offenders, [])
 
-    def test_every_field_parses_as_named_argument(self):
+    def test_every_field_parses_as_named_argument(self) -> None:
         """Each field accepts the ``--name=value`` form the panel emits."""
         for name, field in NwbSettings.model_fields.items():
             with self.subTest(field=name):
@@ -129,12 +130,12 @@ class TestAppPanelContract(unittest.TestCase):
                 settings = _make_settings([f"--{name}={value}"])
                 self.assertIsNotNone(getattr(settings, name))
 
-    def test_field_names_use_underscores(self):
+    def test_field_names_use_underscores(self) -> None:
         """pydantic-settings style: no hyphens in field names."""
         offenders = [name for name in NwbSettings.model_fields if "-" in name]
         self.assertEqual(offenders, [])
 
-    def test_every_field_has_a_description(self):
+    def test_every_field_has_a_description(self) -> None:
         """A panel with no descriptions is unusable by an operator."""
         missing = [
             name for name, field in NwbSettings.model_fields.items() if not field.description

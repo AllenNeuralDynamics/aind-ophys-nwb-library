@@ -9,6 +9,8 @@ Lives in ``tests/`` because ``[tool.coverage.run] source`` includes ``tests``;
 keep it exercised by the tests that import it.
 """
 
+from typing import Optional
+
 from aind_pophys_metadata.io import object_type_value
 
 FRAME_RATE = 9.48
@@ -25,7 +27,7 @@ FOV_HEIGHT = 512
 STRUCTURES = ("VISp", "VISl")
 
 
-def _v1_fov(index, structure, coupled_index):
+def _v1_fov(index: int, structure: str, coupled_index: int) -> dict:
     """Return one minimal v1 ``ophys_fovs`` entry.
 
     Parameters
@@ -56,7 +58,7 @@ def _v1_fov(index, structure, coupled_index):
     }
 
 
-def v1_session(plane_count=2, subject_id=SUBJECT_ID) -> dict:
+def v1_session(plane_count: int = 2, subject_id: Optional[str] = SUBJECT_ID) -> dict:
     """Return a minimal v1 ``session.json`` dict.
 
     Parameters
@@ -104,7 +106,7 @@ def v1_session_without_planes() -> dict:
     return session
 
 
-def _v2_plane(index, structure, coupled_index):
+def _v2_plane(index: int, structure: str, coupled_index: int) -> dict:
     """Return one minimal v2 ``CoupledPlane`` dict.
 
     Parameters
@@ -133,7 +135,7 @@ def _v2_plane(index, structure, coupled_index):
     }
 
 
-def v2_acquisition(plane_count=2, subject_id=SUBJECT_ID) -> dict:
+def v2_acquisition(plane_count: int = 2, subject_id: Optional[str] = SUBJECT_ID) -> dict:
     """Return a minimal v2 ``acquisition.json`` dict.
 
     Parameters
@@ -210,7 +212,41 @@ def v2_acquisition(plane_count=2, subject_id=SUBJECT_ID) -> dict:
     return acquisition
 
 
-def subject(genotype=GENOTYPE) -> dict:
+def minimal_metadata(plane_count: int = 2) -> dict:
+    """Return a flat minimal ``metadata.json`` dict.
+
+    Parameters
+    ----------
+    plane_count : int, optional
+        Number of imaging planes; 2 gives one coupled pair.
+
+    Returns
+    -------
+    dict
+        The raw minimal document.
+    """
+    return {
+        "frame_rate": FRAME_RATE,
+        "instrument_id": INSTRUMENT_ID,
+        "subject_id": SUBJECT_ID,
+        "excitation_nm": EXCITATION_NM,
+        "emission_nm": EMISSION_NM,
+        "planes": [
+            {
+                "plane_index": index,
+                "coupled_plane_index": index // 2,
+                "structure": STRUCTURES[index % len(STRUCTURES)],
+                "depth": 150 + 50 * index,
+                "um_per_pixel": SCALE_UM_PER_PX,
+                "width": FOV_WIDTH,
+                "height": FOV_HEIGHT,
+            }
+            for index in range(plane_count)
+        ],
+    }
+
+
+def subject(genotype: str = GENOTYPE) -> dict:
     """Return a minimal ``subject.json`` dict."""
     return {"subject_id": SUBJECT_ID, "genotype": genotype}
 
@@ -228,11 +264,11 @@ def procedures() -> dict:
     }
 
 
-def data_description(name=DATASET_NAME) -> dict:
+def data_description(name: str = DATASET_NAME) -> dict:
     """Return a minimal ``data_description.json`` dict."""
     return {"name": name}
 
 
-def platform(frame_rate=FRAME_RATE) -> dict:
+def platform(frame_rate: float = FRAME_RATE) -> dict:
     """Return a minimal v1 ``platform.json`` dict carrying a frame rate."""
     return {"imaging_plane_groups": [{"acquisition_framerate_Hz": frame_rate}]}

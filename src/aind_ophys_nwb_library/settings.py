@@ -6,11 +6,10 @@ of pynwb / hdmf-zarr / aind-data-schema side effects, and discoverable by
 
 Every field name is at least two characters: pydantic-settings renders a
 one-character field as a *short* option (``-i``), which a Code Ocean app panel
-can never emit because it only produces ``--name=value``. The v1 capsule used
-argparse with ``--input_directory`` / ``--output_directory``; those are renamed
-here to ``input_dir`` / ``output_dir`` to match every other library in the
-pipeline (which is also why the pipeline's ``ophys_nwb`` invocation must be
-updated -- see the README).
+can never emit because it only produces ``--name=value``.
+
+``input_dir`` / ``output_dir`` match every other library in the pipeline, so
+the pipeline's ``ophys_nwb`` invocation must pass those names.
 """
 
 from pathlib import Path
@@ -81,9 +80,9 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
     verify: bool = Field(
         default=False,
         description=(
-            "Round-trip the emitted processing.json and quality_control.json "
-            "through the core v2 schema objects, and re-open the NWB Zarr "
-            "store, after writing."
+            "After writing, round-trip the emitted processing.json and "
+            "quality_control.json through the core v2 schema objects. The NWB "
+            "Zarr store is re-opened either way, for the QC metric."
         ),
     )
 

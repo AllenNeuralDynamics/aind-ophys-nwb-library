@@ -11,8 +11,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import List
 
-from aind_data_schema.core.quality_control import QualityControl, Status
+import numpy as np
+from aind_data_schema.core.quality_control import QCMetric, QualityControl, Status
 
 from aind_ophys_nwb_library import qc
 
@@ -25,13 +27,13 @@ COMPLETE = {name: True for name in qc.PLANE_CONTAINERS}
 class TestPlaneContentsMetric(unittest.TestCase):
     """Per-plane record of which NWB containers were written."""
 
-    def test_complete_plane_passes(self):
+    def test_complete_plane_passes(self) -> None:
         """Every container present and ROIs written is a PASS."""
         metric = qc.build_plane_contents_metric("VISp_0", COMPLETE, 42)
         self.assertEqual(metric.status_history[-1].status, Status.PASS)
         self.assertEqual(metric.value["num_rois"], 42)
 
-    def test_missing_containers_are_named_in_the_description(self):
+    def test_missing_containers_are_named_in_the_description(self) -> None:
         """A reviewer sees which containers are absent, not just a fail."""
         contents = dict(COMPLETE, dff=False, events=False)
         metric = qc.build_plane_contents_metric("VISp_0", contents, 42)
@@ -39,18 +41,18 @@ class TestPlaneContentsMetric(unittest.TestCase):
         self.assertIn("events", metric.description)
         self.assertFalse(metric.value["dff"])
 
-    def test_no_traces_fails(self):
+    def test_no_traces_fails(self) -> None:
         """A plane with no ROI fluorescence is not usable."""
         contents = dict(COMPLETE, roi_fluorescence=False)
         metric = qc.build_plane_contents_metric("VISp_0", contents, 42)
         self.assertEqual(metric.status_history[-1].status, Status.FAIL)
 
-    def test_zero_rois_fails(self):
+    def test_zero_rois_fails(self) -> None:
         """Traces over zero ROIs is a failure, not a pass."""
         metric = qc.build_plane_contents_metric("VISp_0", COMPLETE, 0)
         self.assertEqual(metric.status_history[-1].status, Status.FAIL)
 
-    def test_unknown_container_keys_are_ignored(self):
+    def test_unknown_container_keys_are_ignored(self) -> None:
         """Only the declared container set lands in the value."""
         metric = qc.build_plane_contents_metric("VISp_0", {"surprise": True}, 1)
         self.assertNotIn("surprise", metric.value)
@@ -59,12 +61,24 @@ class TestPlaneContentsMetric(unittest.TestCase):
             set(qc.PLANE_CONTAINERS),
         )
 
-    def test_name_is_scoped_to_the_plane(self):
+    def test_numpy_roi_count_is_coerced(self) -> None:
+        """The ROI count is derived from a mask array's shape.
+
+        A numpy integer is not JSON-serializable, so the value must be coerced
+        rather than stored as it arrives.
+        """
+        metric = qc.build_plane_contents_metric("VISp_0", COMPLETE, np.int64(42))
+        self.assertIsInstance(metric.value["num_rois"], int)
+        self.assertNotIsInstance(metric.value["num_rois"], np.integer)
+        self.assertEqual(metric.status_history[-1].status, Status.PASS)
+        json.dumps(metric.value)
+
+    def test_name_is_scoped_to_the_plane(self) -> None:
         """Metric names must be unique within the one session document."""
         metric = qc.build_plane_contents_metric("VISl_1", COMPLETE, 3)
         self.assertTrue(metric.name.startswith("VISl_1"))
 
-    def test_each_required_container_fails_on_its_own(self):
+    def test_each_required_container_fails_on_its_own(self) -> None:
         """Any missing required container fails, not just roi_fluorescence.
 
         Without this, a plane missing dF/F, events AND classification still
@@ -80,7 +94,7 @@ class TestPlaneContentsMetric(unittest.TestCase):
                 self.assertEqual(metric.status_history[-1].status, Status.FAIL)
                 self.assertIn(container, metric.description)
 
-    def test_optional_container_absence_still_passes(self):
+    def test_optional_container_absence_still_passes(self) -> None:
         """A container a full run may legitimately omit does not fail."""
         optional = set(qc.PLANE_CONTAINERS) - set(qc.REQUIRED_PLANE_CONTAINERS)
         self.assertTrue(optional, "expected at least one non-required container")
@@ -91,7 +105,7 @@ class TestPlaneContentsMetric(unittest.TestCase):
                 metric = qc.build_plane_contents_metric("VISp_0", contents, 3)
                 self.assertEqual(metric.status_history[-1].status, Status.PASS)
 
-    def test_required_containers_are_a_subset_of_all(self):
+    def test_required_containers_are_a_subset_of_all(self) -> None:
         """The required set cannot drift out of PLANE_CONTAINERS."""
         self.assertTrue(
             set(qc.REQUIRED_PLANE_CONTAINERS) <= set(qc.PLANE_CONTAINERS),
@@ -101,7 +115,7 @@ class TestPlaneContentsMetric(unittest.TestCase):
 class TestNwbWrittenMetric(unittest.TestCase):
     """Session-level record of the packaged file."""
 
-    def test_reopened_passes(self):
+    def test_reopened_passes(self) -> None:
         """A re-openable store carrying every plane is a PASS."""
         metric = qc.build_nwb_written_metric(PLANE_IDS, NWB_REFERENCE, True)
         self.assertEqual(metric.status_history[-1].status, Status.PASS)
@@ -109,7 +123,7 @@ class TestNwbWrittenMetric(unittest.TestCase):
         self.assertEqual(metric.value["planes"], list(PLANE_IDS))
         self.assertEqual(metric.reference, NWB_REFERENCE)
 
-    def test_not_reopened_fails(self):
+    def test_not_reopened_fails(self) -> None:
         """A store that could not be re-opened is a FAIL, not PENDING.
 
         The round-trip is always attempted, so ``readable=False`` means the
@@ -125,7 +139,7 @@ class TestNwbWrittenMetric(unittest.TestCase):
 class TestNwbReviewMetric(unittest.TestCase):
     """The reviewer dropdown."""
 
-    def test_is_pending_with_both_options(self):
+    def test_is_pending_with_both_options(self) -> None:
         """The dropdown is unset and offers a pass and a fail option."""
         metric = qc.build_nwb_review_metric(NWB_REFERENCE)
         self.assertEqual(metric.status_history[-1].status, Status.PENDING)
@@ -136,7 +150,7 @@ class TestNwbReviewMetric(unittest.TestCase):
 class TestMetricInvariants(unittest.TestCase):
     """Properties every metric in the document must satisfy."""
 
-    def _all_metrics(self):
+    def _all_metrics(self) -> List[QCMetric]:
         """Return one of every metric this module produces."""
         return [
             qc.build_plane_contents_metric("VISp_0", COMPLETE, 5),
@@ -144,13 +158,13 @@ class TestMetricInvariants(unittest.TestCase):
             qc.build_nwb_review_metric(NWB_REFERENCE),
         ]
 
-    def test_every_metric_seeds_status_history(self):
+    def test_every_metric_seeds_status_history(self) -> None:
         """An empty status_history raises IndexError in QualityControl."""
         for metric in self._all_metrics():
             with self.subTest(metric=metric.name):
                 self.assertTrue(metric.status_history)
 
-    def test_every_metric_carries_the_grouping_tags(self):
+    def test_every_metric_carries_the_grouping_tags(self) -> None:
         """default_grouping is ["evaluation"], so the tag must be present."""
         for metric in self._all_metrics():
             with self.subTest(metric=metric.name):
@@ -161,13 +175,13 @@ class TestMetricInvariants(unittest.TestCase):
 class TestQualityControlDocument(unittest.TestCase):
     """The full QualityControl document and its writer."""
 
-    def test_build_uses_project_default_grouping(self):
+    def test_build_uses_project_default_grouping(self) -> None:
         """The shared standard grouping is applied."""
         document = qc.build_quality_control([qc.build_nwb_review_metric(NWB_REFERENCE)])
         self.assertIsInstance(document, QualityControl)
         self.assertEqual(document.default_grouping, ["evaluation"])
 
-    def test_write_and_round_trip(self):
+    def test_write_and_round_trip(self) -> None:
         """The written file validates back into a core v2 QualityControl."""
         metrics = [qc.build_plane_contents_metric(plane_id, COMPLETE, 5) for plane_id in PLANE_IDS]
         metrics.append(qc.build_nwb_written_metric(PLANE_IDS, NWB_REFERENCE, True))

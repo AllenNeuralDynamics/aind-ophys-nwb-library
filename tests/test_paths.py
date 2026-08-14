@@ -19,7 +19,7 @@ from aind_ophys_nwb_library.utils.paths import (
 class TestRelativeToRoot(unittest.TestCase):
     """Relative provenance paths, including the symlinked-root case."""
 
-    def test_plain_relative_path(self):
+    def test_plain_relative_path(self) -> None:
         """A path under the root is returned relative to it."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -27,7 +27,7 @@ class TestRelativeToRoot(unittest.TestCase):
             target.mkdir(parents=True)
             self.assertEqual(relative_to_root(root, target), "nwb")
 
-    def test_symlinked_root_still_resolves(self):
+    def test_symlinked_root_still_resolves(self) -> None:
         """A symlinked root does not leak an absolute path."""
         with tempfile.TemporaryDirectory() as tmp:
             real = Path(tmp) / "work"
@@ -39,14 +39,14 @@ class TestRelativeToRoot(unittest.TestCase):
                 "nwb",
             )
 
-    def test_path_outside_root_falls_back_to_absolute(self):
+    def test_path_outside_root_falls_back_to_absolute(self) -> None:
         """A path genuinely outside the root keeps full provenance."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "results"
             root.mkdir()
             outside = Path(tmp) / "elsewhere"
             outside.mkdir()
-            self.assertEqual(relative_to_root(root, outside), str(outside))
+            self.assertEqual(relative_to_root(root, outside), str(outside.resolve()))
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ dependencies = [
     # so bumping either alone leaves the environment unresolvable.
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@afcb367f71c3127173a1ae4357135a41901e0466",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@b473a1e5288096c48e47d2bf03cb24d48ef46b50",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
     # Shared with the ephys pipeline and deliberately NOT absorbed here. It
     # declares no aind-data-schema constraint at all, so it does not fight
@@ -51,12 +51,13 @@ dependencies = [
     # pynwb>=4.0.0, so the capsule image's pynwb==2.8.3 could never coexist
     # with it. Verified 2026-07-30 on 4.1.0 that every symbol consumed here
     # still exists (NWBFile, ImagingPlane, ImageSegmentation, OpticalChannel,
-    # RoiResponseSeries, DfOverF, Fluorescence, GrayscaleImage, Images,
-    # ImageSeries, TimeIntervals, load_namespaces, get_class) and that the
+    # PlaneSegmentation, RoiResponseSeries, DfOverF, Fluorescence,
+    # GrayscaleImage, Images, TimeIntervals, load_namespaces, get_class,
+    # ProcessingModule) and that the
     # ndx-aibs-behavior-ophys namespace still loads and round-trips.
     "pynwb==4.1.0",
-    # hdmf is imported directly (nwb_builders.py:39 from hdmf.common import
-    # VectorData), so it is declared rather than relied on transitively.
+    # hdmf is imported directly in nwb_builders.py (`from hdmf.common import
+    # VectorData`), so it is declared rather than relied on transitively.
     "hdmf==6.1.0",
     "hdmf-zarr==0.13.0",
     "h5py==3.16.0",

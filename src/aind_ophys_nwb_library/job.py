@@ -22,12 +22,12 @@ not the body raised, with the error in ``notes``.
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 from aind_data_schema.components.identifiers import Code
 from aind_data_schema_models.process_names import ProcessName
-from aind_pophys_metadata.paths import relative_to_root
+from aind_pophys_metadata import relative_to_root
 from aind_pophys_metadata.processing import collect_upstream_process_names
 from aind_pophys_metadata.runner import StageContext, stage_guard
 from log_schema.main import setup_logging
@@ -202,10 +202,11 @@ def _package_session(
             plane_artifacts,
             device,
             optical_channel,
-            timestamps=timestamps.get(plane.plane_id),
+            timestamps=timestamps.get(plane[mu.PLANE_ID_KEY]),
         )
         total_rois += num_rois
-        metrics.append(qc.build_plane_contents_metric(plane.plane_id, contents, num_rois))
+        plane_id = plane[mu.PLANE_ID_KEY]
+        metrics.append(qc.build_plane_contents_metric(plane_id, contents, num_rois))
 
     if session is SessionType.MULTIPLANE and not settings.skip_lab_metadata:
         nwb_builders.add_plane_lab_metadata(nwbfile, metadata.planes, settings.extension_namespace)
@@ -233,7 +234,7 @@ def _package_session(
     )
 
 
-def _reopened(nwb_path: Path, plane_ids) -> bool:
+def _reopened(nwb_path: Path, plane_ids: Sequence[str]) -> bool:
     """Re-open the written store and report whether every plane is present.
 
     Parameters

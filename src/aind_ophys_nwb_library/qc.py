@@ -5,11 +5,10 @@ builders. Metric-producing functions *return* metrics; ``job.run`` accumulates
 them and writes ONE ``quality_control.json`` for the whole session (the
 collector pattern).
 
-The v1 capsule emitted **no** QC at all -- this is net-new. It is session-level
-rather than per-plane because ``main.nf`` calls the NWB capsule once with every
-upstream channel ``.collect()``ed, so one run produces exactly one NWB file
-covering every plane; a per-plane document would have no file of its own to
-describe.
+QC is session-level rather than per-plane because ``main.nf`` calls the NWB
+capsule once with every upstream channel ``.collect()``ed, so one run produces
+exactly one NWB file covering every plane; a per-plane document would have no
+file of its own to describe.
 
 Every metric seeds a ``status_history`` entry: an empty one raises
 ``IndexError`` when ``QualityControl`` derives its status.
@@ -17,7 +16,7 @@ Every metric seeds a ``status_history`` entry: an empty one raises
 
 from datetime import datetime as dt
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import pytz
 from aind_data_schema.core.quality_control import (
@@ -52,9 +51,8 @@ PLANE_CONTAINERS = (
 #: Containers that a full pipeline run always produces, so their absence is a
 #: real gap rather than a configuration choice. Gating the metric status on
 #: these is what makes a silently gutted NWB distinguishable from a complete
-#: one: without it, a plane missing dF/F, events AND classification still
-#: scored PASS, and the overall QualityControl status was byte-identical to a
-#: healthy run.
+#: one -- otherwise a plane missing dF/F, events and classification still
+#: scores PASS.
 REQUIRED_PLANE_CONTAINERS = (
     "roi_fluorescence",
     "dff",
@@ -85,7 +83,7 @@ def _automated_status(status: Status) -> QCStatus:
 
 def _metric(
     name: str,
-    value,
+    value: Any,
     description: str,
     status: Status,
     reference: Optional[str] = None,

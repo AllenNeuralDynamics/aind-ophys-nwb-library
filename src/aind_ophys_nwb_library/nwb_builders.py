@@ -1,22 +1,18 @@
 """pynwb object construction from upstream ophys pipeline artifacts.
 
-Ported from the v1 capsule's ``run_capsule.py``, with three structural changes:
+Multiplane and single-plane sessions share one :func:`add_plane`, parameterised
+by the timing source and the container-name suffix, so a fix cannot land on one
+path and miss the other. The microscope device is described from the acquisition
+metadata's ``instrument_id``, which the shared read layer supplies for both
+schema versions.
 
-* the near-duplicate ``nwb_ophys`` (multiplane) and ``nwb_ophys_single_plane``
-  functions are collapsed into one :func:`add_plane` parameterised by the
-  timing source and the container-name suffix, so a fix can no longer land on
-  one path and miss the other (the v1 pair had already diverged);
-* the v1 ``rig.json`` read is gone -- the microscope device is described from
-  the acquisition metadata's ``instrument_id`` (v1 ``rig_id`` / v2
-  ``instrument_id``), which the shared read layer supplies for both versions;
-* every ``except Exception: pass``-style swallow now logs what failed and why,
-  and the extraction traces (without which there is nothing to package) raise
-  instead of being skipped.
+An optional artifact that cannot be read is logged and its NWB container
+omitted; the extraction traces, without which there is nothing to package,
+raise instead.
 
 Verified 2026-07-30 against pynwb 4.1.0 / hdmf 6.1.0 / hdmf-zarr 0.13.0: every
-symbol below still exists and the resulting object graph round-trips through
-``NWBZarrIO``. The capsule image had pinned pynwb 2.8.3, which
-``aind-nwb-utils>=0.2.6`` (``pynwb>=4.0.0``) makes uninstallable.
+symbol below exists and the resulting object graph round-trips through
+``NWBZarrIO``.
 
 Coverage-omitted (see pyproject): it needs real HDF5 payloads and a writable
 Zarr store, i.e. a Code Ocean data run.
@@ -38,17 +34,19 @@ from hdmf_zarr import NWBZarrIO
 from pynwb import NWBFile
 from pynwb.epoch import TimeIntervals
 from pynwb.image import GrayscaleImage, Images
+from pynwb.base import ProcessingModule
 from pynwb.ophys import (
     DfOverF,
     Fluorescence,
     ImageSegmentation,
     ImagingPlane,
     OpticalChannel,
+    PlaneSegmentation,
     RoiResponseSeries,
 )
 
 from .file_handling import PlaneArtifacts
-from .utils.metadata_utils import NwbMetadata, PlaneMetadata
+from .utils.metadata_utils import NwbMetadata, plane_location
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +83,7 @@ class SegmentationApproach(Enum):
     }
 
 
-def load_pynwb_extension(path: Path):
+def load_pynwb_extension(path: Path) -> type:
     """Load the ndx-aibs-behavior-ophys namespace and return its metadata type.
 
     Parameters
@@ -236,10 +234,8 @@ def collapse_masks_to_label_image(masks: np.ndarray) -> np.ndarray:
         mask covering them (0 = no mask). All zeros when there are no ROIs.
     """
     label_image = np.zeros(masks.shape[1:], dtype="i2")
-    # A plane can legitimately have zero ROIs -- extraction's CaImAn branch
-    # emits an empty mask array. Without this guard np.argmax raises
-    # "attempt to get argmax of an empty sequence", which killed packaging for
-    # EVERY plane and named neither the plane nor the file.
+    # A plane can legitimately have zero ROIs: extraction's CaImAn branch
+    # emits an empty mask array, and np.argmax raises on one.
     if masks.shape[0] == 0:
         return label_image
     covered = masks.any(0) if masks.dtype == bool else masks.sum(0) > 0
@@ -341,9 +337,9 @@ CLASSIFICATION_COLUMN_SPECS = (
     ("dendrite_probability", "Dendrite probabilities"),
 )
 
-#: roi_table columns sourced from EXTRACTION's own output. Deliberately kept
-#: separate from the classification specs: coupling them meant a classifier
-#: ROI-count mismatch also dropped these, even though extraction.h5 was fine.
+#: roi_table columns sourced from EXTRACTION's own output. Kept separate from
+#: the classification specs so a classifier ROI-count mismatch cannot drop
+#: columns that extraction.h5 supplied perfectly well.
 EXTRACTION_COLUMN_SPECS = (
     (
         "cellpose_soma_probability",
@@ -400,9 +396,12 @@ def _classification_columns(
     -------
     dict of str to numpy.ndarray, or None
         The four classifier columns, or ``None`` when the classification file
-        is absent or disagrees on the ROI count. The extraction-derived
-        columns are built separately by :func:`_extraction_columns`, so they
-        survive a classifier problem.
+        is absent or disagrees on the ROI count. ``soma/probabilities`` and
+        ``dendrites/probabilities`` are ``predict_proba`` output and stay 2-D
+        ``(n_rois, n_classes)`` here; :func:`_add_rois` takes the positive
+        class off the last column. The extraction-derived columns are built
+        separately by :func:`_extraction_columns`, so they survive a
+        classifier problem.
     """
     classification = artifacts.classification_h5
     if classification is None:
@@ -471,7 +470,7 @@ def _extraction_columns(
 
 
 def _add_rois(
-    plane_segmentation,
+    plane_segmentation: PlaneSegmentation,
     masks: np.ndarray,
     columns: Optional[Dict[str, np.ndarray]],
     extraction_columns: Dict[str, np.ndarray],
@@ -485,7 +484,11 @@ def _add_rois(
     masks : numpy.ndarray
         Dense per-ROI masks of shape ``(n_rois, height, width)``.
     columns : dict of str to numpy.ndarray, or None
-        The classifier's four columns, or ``None`` when unavailable.
+        The classifier's four columns, or ``None`` when unavailable. The two
+        probability columns must be 2-D ``(n_rois, n_classes)``
+        ``predict_proba`` output: the positive class is read as ``[idx][-1]``,
+        so a 1-D array passes the ROI-count check and then indexes the wrong
+        axis.
     extraction_columns : dict of str to numpy.ndarray
         The extraction-derived columns, always present.
     """
@@ -681,9 +684,9 @@ def _series_kwargs(
 
 
 def _add_traces(
-    module,
+    module: ProcessingModule,
     artifacts: PlaneArtifacts,
-    plane_segmentation,
+    plane_segmentation: PlaneSegmentation,
     num_rois: int,
     suffix: str,
     timing: Dict[str, Any],
@@ -737,12 +740,12 @@ def _add_traces(
         )
         local_timing = dict(timing)
         ts = local_timing.get("timestamps")
-        # Debug-mode movies are truncated upstream of this trace file but the
-        # sync-derived timestamps are not, so the two lengths can disagree.
-        # The trace length is authoritative, and every upstream cap is a head
-        # slice, so the head of the timestamp vector is the matching window.
-        # Outside a debug run a mismatch is a genuine correctness signal, so
-        # it is never trimmed silently.
+        # A debug run caps the movie to its first N frames, so the traces are
+        # short while the sync file still describes the whole acquisition --
+        # that is the expected cause of a mismatch here. Every upstream cap is
+        # a head slice, so the head of the timestamp vector is the matching
+        # window. Any other cause means the movie and the sync record genuinely
+        # disagree, hence the warning rather than a silent trim.
         if ts is not None and len(ts) != data.shape[1]:
             logger.warning(
                 "%s for %s has %s samples but %s sync timestamps; trimming "
@@ -794,7 +797,7 @@ def _add_traces(
 def add_plane(
     nwbfile: NWBFile,
     metadata: NwbMetadata,
-    plane: PlaneMetadata,
+    plane: Dict[str, Any],
     artifacts: PlaneArtifacts,
     device: pynwb.device.Device,
     optical_channel: OpticalChannel,
@@ -808,8 +811,8 @@ def add_plane(
         The file being built.
     metadata : NwbMetadata
         The acquisition metadata.
-    plane : PlaneMetadata
-        This plane's imaging metadata.
+    plane : dict
+        This plane's imaging metadata record.
     artifacts : PlaneArtifacts
         Resolved upstream artifacts for this plane.
     device : pynwb.device.Device
@@ -828,11 +831,11 @@ def add_plane(
         The number of ROIs written.
     """
     suffix = "_timeseries" if timestamps is not None else ""
-    resolution = float(plane.scale_factor) if plane.scale_factor else 1.0
-    logger.info("Packaging plane %s", plane.plane_id)
+    resolution = float(plane["scale_factor"]) if plane["scale_factor"] else 1.0
+    logger.info("Packaging plane %s", plane["plane_id"])
 
     imaging_plane = nwbfile.create_imaging_plane(
-        name=plane.plane_id,
+        name=plane["plane_id"],
         optical_channel=optical_channel,
         imaging_rate=float(metadata.frame_rate),
         description="Two-photon imaging plane",
@@ -843,15 +846,15 @@ def add_plane(
             else float("nan")
         ),
         indicator=metadata.indicator or "unknown",
-        location=plane.location,
+        location=plane_location(plane),
         grid_spacing=[resolution, resolution],
-        grid_spacing_unit=plane.coordinate_unit,
-        origin_coords=[0.0, 0.0, float(plane.depth or 0.0)],
-        origin_coords_unit=plane.depth_unit,
+        grid_spacing_unit=plane["scale_factor_unit"],
+        origin_coords=[0.0, 0.0, float(plane["depth"] or 0.0)],
+        origin_coords_unit=plane["depth_unit"],
     )
     module = nwbfile.create_processing_module(
-        name=plane.plane_id,
-        description=f"Processed ophys data for {plane.plane_id}",
+        name=plane["plane_id"],
+        description=f"Processed ophys data for {plane['plane_id']}",
     )
 
     approach = segmentation_approach(artifacts.extraction_h5)
@@ -897,10 +900,8 @@ def add_plane(
     )
     contents["classification"] = columns is not None
     # Derived from the two PNG paths, NOT from bool(images): _summary_images
-    # also appends the segmentation and neuropil mask images to that same list,
-    # neither of which is a projection, so bool(images) reported True even when
-    # both projection PNGs were absent -- and the human-readable description is
-    # built from this same flag.
+    # appends the segmentation and neuropil mask images to that same list, so a
+    # non-empty list does not mean either projection was found.
     contents["projections"] = (
         artifacts.average_projection_png is not None
         and artifacts.maximum_projection_png is not None
@@ -909,7 +910,7 @@ def add_plane(
 
 
 def sync_timestamps_per_plane(
-    planes: Sequence[PlaneMetadata],
+    planes: Sequence[Dict[str, Any]],
     sync_timestamps: np.ndarray,
 ) -> Dict[str, np.ndarray]:
     """Split multiplane sync edges into per-plane timestamp arrays.
@@ -920,7 +921,7 @@ def sync_timestamps_per_plane(
 
     Parameters
     ----------
-    planes : sequence of PlaneMetadata
+    planes : sequence of dict
         Planes in acquisition order.
     sync_timestamps : numpy.ndarray
         Rising edges of the 2p vsync line, in seconds.
@@ -948,14 +949,15 @@ def sync_timestamps_per_plane(
     result: Dict[str, np.ndarray] = {}
     for position, plane in enumerate(planes):
         group = position // 2
-        if plane.coupled_plane_index is not None and plane.coupled_plane_index != group:
+        coupled = plane["coupled_plane_index"]
+        if coupled is not None and coupled != group:
             raise ValueError(
-                f"Plane {plane.plane_id} is at position {position} "
+                f"Plane {plane['plane_id']} is at position {position} "
                 f"(temporal group {group}) but declares coupled index "
-                f"{plane.coupled_plane_index}; the acquisition metadata and "
+                f"{coupled}; the acquisition metadata and "
                 f"the plane ordering disagree."
             )
-        result[plane.plane_id] = sync_timestamps[group::groups]
+        result[plane["plane_id"]] = sync_timestamps[group::groups]
     return result
 
 
@@ -1012,7 +1014,7 @@ def add_epoch_intervals(
 
 def add_plane_lab_metadata(
     nwbfile: NWBFile,
-    planes: Sequence[PlaneMetadata],
+    planes: Sequence[Dict[str, Any]],
     namespace_path: Path,
 ) -> None:
     """Attach the per-plane ndx-aibs-behavior-ophys lab metadata.
@@ -1021,7 +1023,7 @@ def add_plane_lab_metadata(
     ----------
     nwbfile : NWBFile
         The file being built.
-    planes : sequence of PlaneMetadata
+    planes : sequence of dict
         Planes in acquisition order.
     namespace_path : Path
         Path to the extension namespace YAML.
@@ -1030,15 +1032,15 @@ def add_plane_lab_metadata(
     for plane in planes:
         nwbfile.add_lab_meta_data(
             ophys_metadata(
-                name=plane.plane_id,
-                imaging_depth=str(plane.depth) if plane.depth is not None else "",
+                name=plane["plane_id"],
+                imaging_depth=str(plane["depth"]) if plane["depth"] is not None else "",
                 imaging_plane_group=(
-                    str(plane.coupled_plane_index)
-                    if plane.coupled_plane_index is not None
+                    str(plane["coupled_plane_index"])
+                    if plane["coupled_plane_index"] is not None
                     else "-1"
                 ),
-                field_of_view_width=str(plane.width) if plane.width is not None else "",
-                field_of_view_height=str(plane.height) if plane.height is not None else "",
+                field_of_view_width=str(plane["width"]) if plane["width"] is not None else "",
+                field_of_view_height=str(plane["height"]) if plane["height"] is not None else "",
             )
         )
 
