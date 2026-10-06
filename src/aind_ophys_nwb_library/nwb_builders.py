@@ -18,10 +18,11 @@ Coverage-omitted (see pyproject): it needs real HDF5 payloads and a writable
 Zarr store, i.e. a Code Ocean data run.
 """
 
+import json
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import h5py
 import matplotlib.pyplot as plt
@@ -31,16 +32,21 @@ import sparse
 from hdmf.common import VectorData
 from hdmf_zarr import NWBZarrIO
 from pynwb import NWBFile
-from pynwb.image import GrayscaleImage
+from pynwb.epoch import TimeIntervals
+from pynwb.image import GrayscaleImage, Images
+from pynwb.base import ProcessingModule
 from pynwb.ophys import (
+    DfOverF,
+    Fluorescence,
     ImageSegmentation,
     ImagingPlane,
     OpticalChannel,
     PlaneSegmentation,
+    RoiResponseSeries,
 )
 
 from .file_handling import PlaneArtifacts
-from .utils.metadata_utils import NwbMetadata
+from .utils.metadata_utils import NwbMetadata, plane_location
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +655,394 @@ def _summary_images(
     if neuropil_image is not None:
         images.append(neuropil_image)
     return images
+
+
+def _series_kwargs(
+    timestamps: Optional[np.ndarray],
+    frame_rate: float,
+) -> Dict[str, Any]:
+    """Return the timing kwargs for a RoiResponseSeries.
+
+    Multiplane sessions carry per-plane sync timestamps; single-plane sessions
+    have no sync file and fall back to the acquisition frame rate.
+
+    Parameters
+    ----------
+    timestamps : numpy.ndarray or None
+        Per-frame timestamps for this plane, or ``None``.
+    frame_rate : float
+        Acquisition frame rate in Hz.
+
+    Returns
+    -------
+    dict
+        Either ``{"timestamps": ...}`` or ``{"rate": ..., "starting_time": 0}``.
+    """
+    if timestamps is not None:
+        return {"timestamps": timestamps}
+    return {"rate": float(frame_rate), "starting_time": 0.0}
+
+
+def _add_traces(
+    module: ProcessingModule,
+    artifacts: PlaneArtifacts,
+    plane_segmentation: PlaneSegmentation,
+    num_rois: int,
+    suffix: str,
+    timing: Dict[str, Any],
+) -> Dict[str, bool]:
+    """Add every available trace container for one plane.
+
+    ``traces/roi`` and ``traces/neuropil`` come from the extraction file and
+    are required -- without them the plane has no timeseries at all. The
+    corrected, dF/F and event traces are optional.
+
+    Parameters
+    ----------
+    module : pynwb.base.ProcessingModule
+        The plane's processing module.
+    artifacts : PlaneArtifacts
+        Resolved upstream artifacts.
+    plane_segmentation : pynwb.ophys.PlaneSegmentation
+        Segmentation table the series reference.
+    num_rois : int
+        Expected ROI count; every trace array must agree.
+    suffix : str
+        Container-name suffix (``""`` single-plane, ``"_timeseries"`` multi),
+        preserving the v1 naming of both paths.
+    timing : dict
+        Timing kwargs from :func:`_series_kwargs`.
+
+    Returns
+    -------
+    dict of str to bool
+        Which containers were added, for the QC metric.
+
+    Raises
+    ------
+    KeyError
+        If the extraction file has no ``traces/roi`` dataset.
+    ValueError
+        If a trace array's ROI count disagrees with the mask count.
+    """
+    added = {name: False for name in ("roi_fluorescence", "neuropil_fluorescence", "dff", "events")}
+
+    def series(name: str, data: np.ndarray, unit: str) -> RoiResponseSeries:
+        """Build one RoiResponseSeries over the plane's ROI table region."""
+        if data.shape[0] != num_rois:
+            raise ValueError(
+                f"{name} for {artifacts.plane_id} has {data.shape[0]} traces "
+                f"but the extraction file has {num_rois} ROI masks; traces "
+                f"and masks are paired by positional ROI index."
+            )
+        region = plane_segmentation.create_roi_table_region(
+            region=list(range(num_rois)), description="List of measured ROIs"
+        )
+        local_timing = dict(timing)
+        ts = local_timing.get("timestamps")
+        # A debug run caps the movie to its first N frames, so the traces are
+        # short while the sync file still describes the whole acquisition --
+        # that is the expected cause of a mismatch here. Every upstream cap is
+        # a head slice, so the head of the timestamp vector is the matching
+        # window. Any other cause means the movie and the sync record genuinely
+        # disagree, hence the warning rather than a silent trim.
+        if ts is not None and len(ts) != data.shape[1]:
+            logger.warning(
+                "%s for %s has %s samples but %s sync timestamps; trimming "
+                "timestamps to the trace length. Expected only for a "
+                "debug-truncated movie -- otherwise the movie and the sync "
+                "record disagree.",
+                name,
+                artifacts.plane_id,
+                data.shape[1],
+                len(ts),
+            )
+            local_timing["timestamps"] = ts[: data.shape[1]]
+        return RoiResponseSeries(name=name, data=data.T, rois=region, unit=unit, **local_timing)
+
+    roi = load_dataset(artifacts.extraction_h5, "roi", "traces")
+    module.add(
+        Fluorescence(
+            roi_response_series=series(f"roi_fluorescence{suffix}", roi, "a.u."),
+            name=f"raw{suffix}",
+        )
+    )
+    added["roi_fluorescence"] = True
+
+    neuropil = load_dataset(artifacts.extraction_h5, "neuropil", "traces")
+    module.add(series(f"neuropil_fluorescence{suffix}", neuropil, "a.u."))
+    added["neuropil_fluorescence"] = True
+
+    corrected = try_load_dataset(artifacts.extraction_h5, "corrected", "traces")
+    if corrected is not None:
+        module.add(series(f"neuropil_corrected{suffix}", corrected, "a.u."))
+
+    dff = try_load_dataset(artifacts.dff_h5, "data")
+    if dff is not None:
+        module.add(
+            DfOverF(
+                roi_response_series=series(f"dff{suffix}", dff, "%"),
+                name=f"dff{suffix}",
+            )
+        )
+        added["dff"] = True
+
+    events = try_load_dataset(artifacts.events_oasis_h5, "events")
+    if events is not None:
+        module.add(series(f"event{suffix}", events, "a.u."))
+        added["events"] = True
+    return added
+
+
+def add_plane(
+    nwbfile: NWBFile,
+    metadata: NwbMetadata,
+    plane: Dict[str, Any],
+    artifacts: PlaneArtifacts,
+    device: pynwb.device.Device,
+    optical_channel: OpticalChannel,
+    timestamps: Optional[np.ndarray] = None,
+) -> Tuple[Dict[str, bool], int]:
+    """Add one imaging plane's segmentation, images and traces to the NWB file.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The file being built.
+    metadata : NwbMetadata
+        The acquisition metadata.
+    plane : dict
+        This plane's imaging metadata record.
+    artifacts : PlaneArtifacts
+        Resolved upstream artifacts for this plane.
+    device : pynwb.device.Device
+        The microscope device.
+    optical_channel : OpticalChannel
+        The optical channel.
+    timestamps : numpy.ndarray, optional
+        Per-frame sync timestamps; when omitted the acquisition frame rate is
+        used instead (single-plane sessions have no sync file).
+
+    Returns
+    -------
+    dict of str to bool
+        Which NWB containers this plane contributed, for QC.
+    int
+        The number of ROIs written.
+    """
+    suffix = "_timeseries" if timestamps is not None else ""
+    resolution = float(plane["scale_factor"]) if plane["scale_factor"] else 1.0
+    logger.info("Packaging plane %s", plane["plane_id"])
+
+    imaging_plane = nwbfile.create_imaging_plane(
+        name=plane["plane_id"],
+        optical_channel=optical_channel,
+        imaging_rate=float(metadata.frame_rate),
+        description="Two-photon imaging plane",
+        device=device,
+        excitation_lambda=float(
+            metadata.excitation_wavelength
+            if metadata.excitation_wavelength is not None
+            else float("nan")
+        ),
+        indicator=metadata.indicator or "unknown",
+        location=plane_location(plane),
+        grid_spacing=[resolution, resolution],
+        grid_spacing_unit=plane["scale_factor_unit"],
+        origin_coords=[0.0, 0.0, float(plane["depth"] or 0.0)],
+        origin_coords_unit=plane["depth_unit"],
+    )
+    module = nwbfile.create_processing_module(
+        name=plane["plane_id"],
+        description=f"Processed ophys data for {plane['plane_id']}",
+    )
+
+    approach = segmentation_approach(artifacts.extraction_h5)
+    img_seg = ImageSegmentation(name="image_segmentation")
+    masks = load_roi_masks(artifacts.extraction_h5)
+    num_rois = int(masks.shape[0])
+    columns = _classification_columns(artifacts, num_rois)
+    # Extraction's own columns are unconditional: a classifier problem must not
+    # remove data that came from extraction.h5.
+    extraction_columns = _extraction_columns(artifacts, num_rois)
+    column_defs, colnames = _roi_table_columns(include_classification=columns is not None)
+    plane_segmentation = img_seg.create_plane_segmentation(
+        name="roi_table",
+        description=approach.value["method"] + approach.value["description"],
+        imaging_plane=imaging_plane,
+        columns=column_defs,
+        colnames=colnames,
+    )
+    _add_rois(plane_segmentation, masks, columns, extraction_columns)
+
+    neuropil_image = _add_neuropil_segmentation(
+        artifacts.extraction_h5, img_seg, imaging_plane, resolution
+    )
+    module.add(img_seg)
+
+    images = _summary_images(artifacts, approach, resolution, neuropil_image)
+    if images:
+        module.add(
+            Images(
+                name="images",
+                images=images,
+                description="Summary images of the two-photon movie",
+            )
+        )
+
+    contents = _add_traces(
+        module,
+        artifacts,
+        plane_segmentation,
+        num_rois,
+        suffix,
+        _series_kwargs(timestamps, metadata.frame_rate),
+    )
+    contents["classification"] = columns is not None
+    # Derived from the two PNG paths, NOT from bool(images): _summary_images
+    # appends the segmentation and neuropil mask images to that same list, so a
+    # non-empty list does not mean either projection was found.
+    contents["projections"] = (
+        artifacts.average_projection_png is not None
+        and artifacts.maximum_projection_png is not None
+    )
+    return contents, num_rois
+
+
+def sync_timestamps_per_plane(
+    planes: Sequence[Dict[str, Any]],
+    sync_timestamps: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    """Split multiplane sync edges into per-plane timestamp arrays.
+
+    Mesoscope planes are acquired in coupled pairs, so the vsync edge train is
+    decimated by the number of temporal groups and offset by each plane's
+    ``coupled_plane_index`` (v1 ``coupled_fov_index``).
+
+    Parameters
+    ----------
+    planes : sequence of dict
+        Planes in acquisition order.
+    sync_timestamps : numpy.ndarray
+        Rising edges of the 2p vsync line, in seconds.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        Per-plane timestamps, keyed by plane id.
+
+    Raises
+    ------
+    ValueError
+        If the plane count is odd, or if a plane's coupled index does not match
+        its position -- either means the acquisition metadata and the coupling
+        assumption disagree, and silently mis-timestamping every trace is worse
+        than failing.
+    """
+    count = len(planes)
+    if count % 2 != 0:
+        raise ValueError(
+            f"Multiplane session has {count} planes; coupled-pair "
+            f"timestamp assignment requires an even number."
+        )
+    groups = count // 2
+    result: Dict[str, np.ndarray] = {}
+    for position, plane in enumerate(planes):
+        group = position // 2
+        coupled = plane["coupled_plane_index"]
+        if coupled is not None and coupled != group:
+            raise ValueError(
+                f"Plane {plane['plane_id']} is at position {position} "
+                f"(temporal group {group}) but declares coupled index "
+                f"{coupled}; the acquisition metadata and "
+                f"the plane ordering disagree."
+            )
+        result[plane["plane_id"]] = sync_timestamps[group::groups]
+    return result
+
+
+def add_epoch_intervals(
+    nwbfile: NWBFile,
+    epoch_json: Path,
+    frame_rate: float,
+) -> NWBFile:
+    """Add single-plane epoch intervals from ``epoch_locations.json``.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The file being built.
+    epoch_json : Path
+        Path to ``epoch_locations.json``, mapping epoch name to
+        ``[start_frame, stop_frame]``.
+    frame_rate : float
+        Frame rate in Hz, used to convert frame indices to seconds.
+
+    Returns
+    -------
+    NWBFile
+        The updated file.
+    """
+    with open(epoch_json, "r") as f:
+        epochs = json.load(f)
+    table = TimeIntervals(
+        name="epochs",
+        description="Epochs for spontaneous and photostim periods",
+        columns=[
+            {"name": "stimulus_name", "description": "Epoch type name from key"},
+            {"name": "start_frame", "description": "start_frame"},
+            {"name": "stop_frame", "description": "stop_frame"},
+        ],
+    )
+    for name, (start_frame, stop_frame) in epochs.items():
+        if "neuron" in name and "slm" not in name:
+            name = "BCI"
+        elif "slm" in name and "post" not in name:
+            name = "photostim"
+        elif "slm" in name and "post" in name:
+            name = "photostim_post"
+        table.add_row(
+            start_time=start_frame / frame_rate,
+            stop_time=stop_frame / frame_rate,
+            start_frame=start_frame,
+            stop_frame=stop_frame,
+            stimulus_name=name,
+        )
+    nwbfile.add_time_intervals(table)
+    return nwbfile
+
+
+def add_plane_lab_metadata(
+    nwbfile: NWBFile,
+    planes: Sequence[Dict[str, Any]],
+    namespace_path: Path,
+) -> None:
+    """Attach the per-plane ndx-aibs-behavior-ophys lab metadata.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The file being built.
+    planes : sequence of dict
+        Planes in acquisition order.
+    namespace_path : Path
+        Path to the extension namespace YAML.
+    """
+    ophys_metadata = load_pynwb_extension(namespace_path)
+    for plane in planes:
+        nwbfile.add_lab_meta_data(
+            ophys_metadata(
+                name=plane["plane_id"],
+                imaging_depth=str(plane["depth"]) if plane["depth"] is not None else "",
+                imaging_plane_group=(
+                    str(plane["coupled_plane_index"])
+                    if plane["coupled_plane_index"] is not None
+                    else "-1"
+                ),
+                field_of_view_width=str(plane["width"]) if plane["width"] is not None else "",
+                field_of_view_height=str(plane["height"]) if plane["height"] is not None else "",
+            )
+        )
 
 
 def write_nwb_zarr(nwbfile: NWBFile, path: Path) -> Path:
