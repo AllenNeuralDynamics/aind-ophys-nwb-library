@@ -90,7 +90,7 @@ def load_pynwb_extension(path: Path) -> type:
     ----------
     path : Path
         Path to ``ndx-aibs-behavior-ophys.namespace.yaml``. It must live under
-        the capsule's ``code/`` directory: ``main.nf`` stages only ``code/``,
+        the Code Ocean capsule's ``code/`` directory: ``main.nf`` stages only ``code/``,
         so a file anywhere else in the repo is absent in every pipeline run.
 
     Returns
@@ -108,7 +108,7 @@ def load_pynwb_extension(path: Path) -> type:
     if not path.is_file():
         raise FileNotFoundError(
             f"pynwb extension namespace not found at {path}. It must be "
-            f"committed under the capsule's code/ directory, which is the "
+            f"committed under the Code Ocean capsule's code/ directory, which is the "
             f"only part of the repo main.nf stages."
         )
     pynwb.load_namespaces(str(path))
@@ -382,7 +382,7 @@ def _classification_columns(
     """Load the per-ROI classification columns, or ``None`` when unusable.
 
     Pairing with the ROI masks is **positional** (suite2p order) -- the
-    cross-capsule contract with ``aind-ophys-classifier`` -- so a length
+    cross-step contract with ``aind-ophys-classifier`` -- so a length
     mismatch is rejected rather than silently truncated.
 
     Parameters
@@ -406,7 +406,7 @@ def _classification_columns(
     classification = artifacts.classification_h5
     if classification is None:
         logger.warning(
-            "No classification file for %s; roi_table will omit the " "soma/dendrite columns.",
+            "No classification file for %s; roi_table will omit the soma/dendrite columns.",
             artifacts.plane_id,
         )
         return None

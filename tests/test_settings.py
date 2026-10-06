@@ -41,10 +41,10 @@ def _sample_cli_value(annotation: Any) -> str:
 
 
 class TestNwbSettingsDefaults(unittest.TestCase):
-    """Default field values match the capsule's Code Ocean mounts."""
+    """Default field values match the Code Ocean mounts."""
 
     def test_defaults(self) -> None:
-        """Defaults point at the standard capsule mounts."""
+        """Defaults point at the standard Code Ocean mounts."""
         settings = _make_settings()
         self.assertEqual(settings.input_dir, Path("/data"))
         self.assertEqual(settings.output_dir, Path("/results"))
@@ -52,10 +52,9 @@ class TestNwbSettingsDefaults(unittest.TestCase):
         self.assertEqual(settings.processed_subdir, "processed")
         self.assertEqual(settings.nwb_name, "pophys.nwb.zarr")
         self.assertFalse(settings.skip_lab_metadata)
-        self.assertFalse(settings.verify)
 
     def test_extension_namespace_default_is_code_relative(self) -> None:
-        """The extension YAML is resolved from the capsule's code/ folder."""
+        """The extension YAML is resolved from the Code Ocean capsule's code/ folder."""
         settings = _make_settings()
         self.assertEqual(
             settings.extension_namespace,
@@ -64,16 +63,16 @@ class TestNwbSettingsDefaults(unittest.TestCase):
         self.assertFalse(settings.extension_namespace.is_absolute())
 
     def test_input_and_output_are_renamed_not_aliased(self) -> None:
-        """The v1 argparse names are replaced, not carried as aliases."""
+        """Only ``input_dir``/``output_dir`` exist, with no ``*_directory`` aliases."""
         self.assertIn("input_dir", NwbSettings.model_fields)
         self.assertIn("output_dir", NwbSettings.model_fields)
         self.assertNotIn("input_directory", NwbSettings.model_fields)
         self.assertNotIn("output_directory", NwbSettings.model_fields)
 
     def test_bool_string_parsing(self) -> None:
-        """Bools parse from strings, which argparse's type=bool cannot do."""
-        settings = _make_settings(["--verify=true"])
-        self.assertTrue(settings.verify)
+        """Bools parse from strings such as ``true``."""
+        settings = _make_settings(["--skip_lab_metadata=true"])
+        self.assertTrue(settings.skip_lab_metadata)
 
 
 class TestRecordedParameters(unittest.TestCase):

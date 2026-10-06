@@ -1,7 +1,6 @@
 """Tests for quality_control.json generation.
 
-The v1 capsule emitted no QC at all, so everything here is net-new against the
-v2 output contract: one full ``QualityControl`` per run, every metric tagged
+Covers the v2 output contract: one full ``QualityControl`` per run, every metric tagged
 with an ``evaluation`` key matching ``default_grouping``, and every metric
 carrying a non-empty ``status_history`` (an empty one raises ``IndexError`` when
 ``QualityControl`` derives its status).
@@ -81,10 +80,8 @@ class TestPlaneContentsMetric(unittest.TestCase):
     def test_each_required_container_fails_on_its_own(self) -> None:
         """Any missing required container fails, not just roi_fluorescence.
 
-        Without this, a plane missing dF/F, events AND classification still
-        scored PASS and the overall QualityControl status was identical to a
-        healthy run — a silently gutted NWB was indistinguishable from a
-        complete one.
+        A plane missing dF/F, events and classification must not score PASS,
+        or a silently gutted NWB is indistinguishable from a complete one.
         """
         for container in qc.REQUIRED_PLANE_CONTAINERS:
             with self.subTest(missing=container):

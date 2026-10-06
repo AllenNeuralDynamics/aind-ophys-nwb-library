@@ -14,9 +14,9 @@ logic lives here with its own tests, and the capsule is a thin wrapper that call
 `aind_ophys_nwb_library.job.run`. Metadata reads, the `Processing` builders and
 the QC document builders come from the shared
 [`aind-pophys-metadata`](https://github.com/AllenNeuralDynamics/aind-pophys-metadata)
-package, so they stay consistent across the pipeline's capsules.
+package, so they stay consistent across the pipeline's steps.
 
-This is the pipeline's **terminal fan-in**. `main.nf` calls the capsule once with
+This is the pipeline's **terminal fan-in**. `main.nf` calls the NWB step once with
 every upstream channel `.collect()`ed, so one invocation sees every plane's
 outputs at the same time and produces exactly **one** NWB file, one
 `processing.json` and one `quality_control.json` for the whole session — not one
@@ -25,8 +25,8 @@ per plane.
 ## What it does
 
 1. Resolve the `raw` and `processed` mounts under `input_dir` (falling back to
-   the mount root when the subdirectory is absent, so a standalone capsule run
-   with flat mounts still works).
+   the mount root when the subdirectory is absent, so a standalone run with
+   flat mounts still works).
 2. Read the acquisition metadata — aind-data-schema v1 `session.json` or v2
    `acquisition.json`, dispatched on which file is present — into the frozen
    `NwbMetadata` view: canonical plane ids, frame rate, instrument id,
@@ -45,7 +45,7 @@ per plane.
 7. Write the NWB Zarr store, re-open it to confirm every plane is present, and
    emit `processing.json` and `quality_control.json`.
 
-### Cross-capsule contracts
+### Cross-step contracts
 
 Two pairings are **positional**, by suite2p ROI order and by plane order, and
 both are checked rather than trusted:
@@ -75,7 +75,7 @@ Settings can also be constructed explicitly:
 from aind_ophys_nwb_library.job import run
 from aind_ophys_nwb_library.settings import NwbSettings
 
-run(NwbSettings(skip_lab_metadata=True, verify=True))
+run(NwbSettings(skip_lab_metadata=True))
 ```
 
 ### Settings
@@ -84,7 +84,7 @@ run(NwbSettings(skip_lab_metadata=True, verify=True))
 `pydantic-settings` model with no environment-variable prefix. Every field is
 addressable as `--name=value`, the only form a Code Ocean app panel emits, and
 no field name is one character long (pydantic-settings would render it as a
-short option the panel can never produce). The capsule's app panel is generated
+short option the panel can never produce). The Code Ocean capsule's app panel is generated
 from this file with `auto-app-panel`.
 
 | field | default | meaning |
@@ -92,14 +92,13 @@ from this file with `auto-app-panel`.
 | `input_dir` | `/data` | mount root; expected to hold `raw/` and `processed/` |
 | `output_dir` | `/results` | results root |
 | `raw_subdir` | `raw` | subdirectory holding the core metadata, sync file and movies |
-| `processed_subdir` | `processed` | subdirectory holding every upstream capsule's results |
+| `processed_subdir` | `processed` | subdirectory holding every upstream step's results |
 | `nwb_name` | `pophys.nwb.zarr` | basename of the Zarr store, written inside `output_dir/nwb/` |
 | `extension_namespace` | `ndx-aibs-behavior-ophys.namespace.yaml` | namespace YAML defining the per-plane `OphysMetadataSchema` lab metadata |
 | `skip_lab_metadata` | `False` | skip that lab metadata; use only when the YAML is unavailable |
-| `verify` | `False` | round-trip the emitted metadata through the v2 schema after writing |
 
 `recorded_parameters()` reduces `extension_namespace` to its basename before it
-reaches `Code.parameters`: in the pipeline the capsule is handed the YAML inside
+reaches `Code.parameters`: in the pipeline the step is handed the YAML inside
 its Nextflow task scratch directory, a path destroyed with the task, so
 recording it verbatim would put a dangling absolute path into permanent
 metadata.
@@ -108,7 +107,7 @@ metadata.
 
 ### `job.py`
 
-Orchestration. `run()` is the entry point the capsule calls: it resolves the
+Orchestration. `run()` is the entry point the runtime wrapper calls: it resolves the
 mounts, loads the metadata, configures logging, and runs the packaging inside
 the shared `stage_guard` so a failure still leaves a `processing.json` naming
 what was attempted and why it stopped.
@@ -128,7 +127,7 @@ the HDF5 reads (`load_dataset()`, `try_load_dataset()`, `load_roi_masks()`,
 
 ### `file_handling.py`
 
-Discovery of the upstream capsule outputs this library repackages.
+Discovery of the upstream step outputs this library repackages.
 `collect_session_artifacts()` resolves one frozen `PlaneArtifacts` per plane
 from `find_artifact()` / `find_artifacts()`, which glob recursively on the
 `<plane_id>_` filename prefix rather than walking a fixed directory layout. Only
@@ -163,7 +162,7 @@ view from one `CoreMetadata.load()` call, so no schema version is compared here;
 pairs each with its canonical `plane_id`.
 `plane_location()` renders a plane's `ImagingPlane.location` string and
 `get_injection_material()` reads the indicator out of `procedures.json`, which
-the shared layer does not normalize. `build_nwb_code()` builds this capsule's
+the shared layer does not normalize. `build_nwb_code()` builds this step's
 `Code` block and `attach_input_data()` records the resolved inputs on it once
 they are known. Reads are raw dicts — nothing here calls `model_validate` on an
 input file, so messy-but-sufficient metadata still packages.
@@ -203,7 +202,7 @@ time-intervals table instead.
 
 `processing.json` and `quality_control.json` are emitted through the shared
 [`aind-pophys-metadata`](https://github.com/AllenNeuralDynamics/aind-pophys-metadata)
-package, so their shape matches every other capsule in the pipeline.
+package, so their shape matches every other step in the pipeline.
 
 ## Level of Support
 Please indicate a level of support:

@@ -51,9 +51,8 @@ class TestPlaneLocation(unittest.TestCase):
 class TestPlaneFields(unittest.TestCase):
     """Every per-plane field the NWB builders consume, read from any version.
 
-    These replace the old per-version plane traversals: the point is no longer
-    which document shape was parsed but that the shared fields arrive
-    populated, identically, for each input the capsule can be handed.
+    The shared fields must arrive populated, identically, for each input
+    the step can be handed.
     """
 
     def _planes(self, core_name: str, core: dict) -> tuple:
@@ -229,7 +228,7 @@ class TestLoadNwbMetadata(unittest.TestCase):
         """A flat minimal metadata.json reads through the same normalized path.
 
         The read is version-agnostic, so a third document shape reaches the
-        capsule as populated fields rather than being parsed as v2.
+        step as populated fields rather than being parsed as v2.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = _raw_mount(tmp, "metadata.json", fixtures.minimal_metadata())
@@ -348,7 +347,7 @@ class TestAttachInputData(unittest.TestCase):
 
 
 class TestStageDocument(unittest.TestCase):
-    """The processing.json the shared stage guard writes for this capsule."""
+    """The processing.json the shared stage guard writes for this step."""
 
     def _run_stage(
         self,
@@ -381,7 +380,7 @@ class TestStageDocument(unittest.TestCase):
         self.assertIsNotNone(process.resources)
 
     def test_name_does_not_collide_with_the_converter(self) -> None:
-        """Both capsules use FILE_FORMAT_CONVERSION and run once per session."""
+        """Both steps use FILE_FORMAT_CONVERSION and run once per session."""
         self.assertNotEqual(mu.DATA_PROCESS_NAME, ProcessName.FILE_FORMAT_CONVERSION.value)
 
     def test_upstream_names_become_dependency_graph_edges(self) -> None:

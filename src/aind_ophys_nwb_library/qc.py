@@ -1,12 +1,12 @@
 """quality_control.json generation for NWB packaging.
 
-Capsule-specific metric content over the shared ``aind_pophys_metadata`` QC
+NWB-packaging metric content over the shared ``aind_pophys_metadata`` QC
 builders. Metric-producing functions *return* metrics; ``job.run`` accumulates
 them and writes ONE ``quality_control.json`` for the whole session (the
 collector pattern).
 
 QC is session-level rather than per-plane because ``main.nf`` calls the NWB
-capsule once with every upstream channel ``.collect()``ed, so one run produces
+step once with every upstream channel ``.collect()``ed, so one run produces
 exactly one NWB file covering every plane; a per-plane document would have no
 file of its own to describe.
 
@@ -198,7 +198,7 @@ def build_nwb_written_metric(
             "planes": list(plane_ids),
             "reopened": bool(readable),
         },
-        description=("The packaged NWB Zarr store, and whether it was re-opened after " "writing"),
+        description="The packaged NWB Zarr store, and whether it was re-opened after writing",
         status=Status.PASS if readable else Status.FAIL,
         reference=nwb_reference,
     )
@@ -224,7 +224,7 @@ def build_nwb_review_metric(nwb_reference: str) -> QCMetric:
         status=REVIEW_STATUS,
         reference=nwb_reference,
         description=(
-            "Does the packaged NWB contain every expected plane, trace type " "and summary image?"
+            "Does the packaged NWB contain every expected plane, trace type and summary image?"
         ),
         metric_type=METRIC_TYPE,
     )

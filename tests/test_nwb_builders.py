@@ -1,6 +1,6 @@
 """Tests for the pynwb builders, driven by real upstream payloads.
 
-Every fixture here stands in for an upstream capsule's compute result, so it is
+Every fixture here stands in for an upstream step's compute result, so it is
 built from the production type: ``numpy`` arrays written into real HDF5 files at
 the shapes extraction, dF/F, OASIS and the classifier actually emit. A Python
 list stands in for none of them -- ``x or default``, ``len(x or [])`` and
@@ -121,7 +121,7 @@ def write_extraction(
 
 
 def write_single_dataset(path: Path, key: str, data: np.ndarray) -> Path:
-    """Write one root-level dataset, as the dF/F and OASIS capsules do.
+    """Write one root-level dataset, as the dF/F and OASIS steps do.
 
     Parameters
     ----------

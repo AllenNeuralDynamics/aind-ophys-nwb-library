@@ -32,7 +32,7 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
         description=(
             "Directory holding the mounted inputs. Expected to contain a "
             "'raw' subdirectory with the core acquisition metadata and a "
-            "'processed' subdirectory with every upstream capsule's output."
+            "'processed' subdirectory with every upstream step's output."
         ),
     )
     output_dir: Path = Field(
@@ -49,7 +49,7 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
     processed_subdir: str = Field(
         default="processed",
         description=(
-            "Name of the subdirectory of input_dir holding every upstream " "capsule's results."
+            "Name of the subdirectory of input_dir holding every upstream step's results."
         ),
     )
     nwb_name: str = Field(
@@ -65,7 +65,7 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
         description=(
             "Path to the ndx-aibs-behavior-ophys namespace YAML that defines "
             "the per-plane OphysMetadataSchema lab metadata. Resolved "
-            "relative to the working directory (the capsule's code/ folder) "
+            "relative to the working directory (the Code Ocean capsule's code/ folder) "
             "when not absolute."
         ),
     )
@@ -77,20 +77,12 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
             "omits imaging_depth / imaging_plane_group / field_of_view_*."
         ),
     )
-    verify: bool = Field(
-        default=False,
-        description=(
-            "After writing, round-trip the emitted processing.json and "
-            "quality_control.json through the core v2 schema objects. The NWB "
-            "Zarr store is re-opened either way, for the QC metric."
-        ),
-    )
 
     def recorded_parameters(self) -> dict:
         """Return the settings as recorded in ``Code.parameters``.
 
         ``extension_namespace`` is reduced to its basename. In the pipeline
-        the capsule is handed the resolved YAML inside its Nextflow task
+        the step is handed the resolved YAML inside its Nextflow task
         scratch directory (``/tmp/nxf.<run>/capsule/code/...``), a path that
         is destroyed with the task, so recording it verbatim would put a
         dangling absolute path into permanent metadata. The basename still

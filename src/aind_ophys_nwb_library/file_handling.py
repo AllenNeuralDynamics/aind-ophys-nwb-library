@@ -1,11 +1,11 @@
-"""Discovery of the upstream capsule outputs this library repackages.
+"""Discovery of the upstream step outputs this library repackages.
 
-This is the pipeline's terminal fan-in: ``main.nf`` calls the NWB capsule once
+This is the pipeline's terminal fan-in: ``main.nf`` calls the NWB step once
 with every upstream channel ``.collect()``ed, so one run sees every plane's
 outputs from motion correction, decrosstalk, extraction, classification, dF/F
 and OASIS event detection at the same time.
 
-Each of those capsules writes ``<plane_id>/<step>/<plane_id>_<artifact>``
+Each of those steps writes ``<plane_id>/<step>/<plane_id>_<artifact>``
 under its results root, and the pipeline copies all of them into one
 ``processed`` mount. v2 changed the *directory* nesting but kept the
 ``<plane_id>_`` filename prefix, so this module globs recursively on the
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Filename suffix of every upstream artifact the NWB builders actually read.
 #
 # Only what is consumed is listed. Notably absent is ``processing.json``: v2
-# capsules write it unprefixed, so globbing for it would match every plane's
+# steps write it unprefixed, so globbing for it would match every plane's
 # and no builder reads it anyway.
 ARTIFACT_PARTS: Dict[str, str] = {
     # aind-ophys-extraction -> <plane>/extraction/<plane>_extraction.h5
@@ -164,6 +164,10 @@ def collect_plane_artifacts(
         If a required artifact cannot be located; the message names the glob
         pattern and the directory searched, because a bare ``StopIteration``
         or ``None`` is the least debuggable failure in the pipeline.
+    ValueError
+        If ``allow_unprefixed`` and more than one unprefixed candidate matches:
+        the metadata resolved a single plane but the mount is ambiguous, so
+        guessing would publish one plane's data under another plane's name.
     """
     resolved: Dict[str, Optional[Path]] = {}
     for key, part in ARTIFACT_PARTS.items():
@@ -199,7 +203,7 @@ def collect_plane_artifacts(
                 raise FileNotFoundError(
                     f"Required upstream artifact '{plane_id}_*{part}' not "
                     f"found under {search_root}. NWB packaging is the "
-                    f"terminal stage, so the producing capsule either did "
+                    f"terminal stage, so the producing step either did "
                     f"not run for this plane or wrote a different filename."
                 )
             logger.warning(

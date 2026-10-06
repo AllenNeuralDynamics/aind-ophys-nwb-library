@@ -1,6 +1,6 @@
 """Tests for upstream-artifact discovery.
 
-This is the cross-capsule contract layer, so the fixtures below mirror the
+This is the cross-step contract layer, so the fixtures below mirror the
 directory layouts the v2 writers actually produce:
 
 * ``<plane>/extraction/<plane>_extraction.h5``  (aind-ophys-extraction)
@@ -256,7 +256,7 @@ class TestSideInputs(unittest.TestCase):
 
 
 class TestArtifactContract(unittest.TestCase):
-    """The artifact table itself is part of the cross-capsule contract."""
+    """The artifact table itself is part of the cross-step contract."""
 
     def test_only_consumed_artifacts_are_globbed(self) -> None:
         """The v1 dict's unconsumed entries were dropped, not carried."""

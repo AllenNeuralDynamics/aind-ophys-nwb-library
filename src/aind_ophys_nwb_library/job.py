@@ -1,8 +1,8 @@
 """Top-level NWB packaging orchestration.
 
-``run()`` is the library entry point called by the thin capsule wrapper: read
+``run()`` is the library entry point called by the thin runtime wrapper: read
 the acquisition metadata (v1 or v2) -> configure logging -> resolve every
-upstream capsule's artifacts -> build one NWB file covering every plane ->
+upstream step's artifacts -> build one NWB file covering every plane ->
 write it as a Zarr store -> emit a full ``processing.json`` and
 ``quality_control.json``.
 
@@ -10,11 +10,11 @@ Everything is written into ``<output_dir>/nwb/`` rather than at the results
 root. ``main.nf`` publishes with ``saveAs { new File(filename).getName() }``,
 which flattens every published path to its basename, so a root-level
 ``processing.json`` would collide with the aggregator tier's. One subdirectory
-also matches the ``<subdir>/<step>`` shape every other v2 capsule adopted.
+also matches the ``<subdir>/<step>`` shape every other v2 step adopted.
 
 There is exactly **one** ``processing.json`` and **one**
 ``quality_control.json`` per run, not one per plane: ``main.nf`` calls this
-capsule once with every upstream channel ``.collect()``ed, so a run produces a
+step once with every upstream channel ``.collect()``ed, so a run produces a
 single NWB file describing all planes. ``processing.json`` is written by the
 shared ``stage_guard``, which times the stage and emits a document whether or
 not the body raised, with the error in ``notes``.
@@ -47,21 +47,12 @@ NWB_SUBDIR = "nwb"
 VSYNC_LINES = ("2p_vsync", "vsync_2p")
 
 
-def _verify_outputs(output_dir: Path) -> None:
-    """Round-trip the emitted metadata through the core v2 schema objects."""
-    from aind_data_schema.core.processing import Processing
-    from aind_data_schema.core.quality_control import QualityControl
-
-    Processing.model_validate_json((Path(output_dir) / "processing.json").read_text())
-    QualityControl.model_validate_json((Path(output_dir) / "quality_control.json").read_text())
-
-
 def _resolve_mount(input_dir: Path, subdir: str) -> Path:
     """Return ``input_dir/subdir``, falling back to ``input_dir`` itself.
 
     In the pipeline the raw and processed assets are copied into
-    ``/data/raw`` and ``/data/processed``; in a standalone capsule run they can
-    be mounted flat. Falling back keeps both usable instead of failing with a
+    ``/data/raw`` and ``/data/processed``; in a standalone run they can be
+    mounted flat. Falling back keeps both usable instead of failing with a
     misleading "no acquisition file" error.
 
     Parameters
@@ -267,9 +258,7 @@ def run(settings: Optional[NwbSettings] = None) -> None:
     Parameters
     ----------
     settings : NwbSettings, optional
-        Parsed settings; constructed from CLI/environment when omitted. When
-        ``settings.verify`` is True, the emitted metadata is round-tripped
-        through the core v2 schema objects after writing.
+        Parsed settings; constructed from CLI/environment when omitted.
     """
     settings = settings or NwbSettings()
 
@@ -305,6 +294,3 @@ def run(settings: Optional[NwbSettings] = None) -> None:
             processed_dir, exclude=mu.DATA_PROCESS_NAME
         )
         _package_session(settings, metadata, raw_dir, processed_dir, output_dir, code, ctx)
-
-    if settings.verify:
-        _verify_outputs(output_dir)

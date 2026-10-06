@@ -4,7 +4,7 @@
 dispatch, the canonical plane ids and every per-plane imaging field; this module
 adds only what is NWB-specific: the ``ImagingPlane.location`` string, the
 indicator read from ``procedures.json``, the session-type fork and the
-``Processing`` builders for this capsule.
+``Processing`` builders for this step.
 
 Two invariants shape the design:
 
@@ -49,7 +49,7 @@ PLANE_ID_KEY = "plane_id"
 #: ``DataProcess.name``. Set explicitly because the converter also uses
 #: ``ProcessName.FILE_FORMAT_CONVERSION``, so both would otherwise derive the
 #: same default name ("File format conversion") and the run-level aggregator
-#: rejects a merged document with duplicate process names. Both capsules run
+#: rejects a merged document with duplicate process names. Both steps run
 #: once per session, so a plane id cannot separate them.
 DATA_PROCESS_NAME = "NWB packaging"
 
@@ -90,7 +90,7 @@ def plane_location(plane: Dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class NwbMetadata:
-    """Minimal metadata the NWB packaging capsule consumes.
+    """Minimal metadata the NWB packaging step consumes.
 
     ``planes`` and ``frame_rate`` are the only required fields: the planes name
     the NWB processing modules and drive the upstream artifact globs, and the
@@ -240,7 +240,7 @@ def identified_planes(core: CoreMetadata) -> Tuple[Dict[str, Any], ...]:
     records = sorted(core.get_plane_records(), key=lambda record: record["plane_index"])
     return tuple(
         {**record, PLANE_ID_KEY: plane_id}
-        for record, plane_id in zip(records, core.get_fov_ids())
+        for record, plane_id in zip(records, core.get_fov_ids(), strict=True)
     )
 
 
@@ -258,7 +258,7 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
     Returns
     -------
     NwbMetadata
-        The minimal fields this capsule consumes.
+        The minimal fields this step consumes.
 
     Raises
     ------
