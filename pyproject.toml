@@ -28,8 +28,8 @@ dependencies = [
     # so bumping either alone leaves the environment unresolvable.
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@adac8ebee57f895bb2d30b69cde01dd41afbce10",
-    "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/aind-log-utils.git@f09685e#subdirectory=python",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.2.0",
+    "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
     # Shared with the ephys pipeline and deliberately NOT absorbed here. It
     # declares no aind-data-schema constraint at all, so it does not fight
     # the exact pin, and its pyproject is byte-identical between 0.2.6 and
@@ -42,14 +42,12 @@ dependencies = [
     # `acquisition_start_time` dispatch arrives in 0.2.8 via #55) AND require
     # a processing.json in the metadata directory, raising
     # `ValueError("Missing metadata file: ")` -- with the filename omitted --
-    # when it is absent; 0.2.8 makes it conditional via #60. The capsule image
-    # pinned 0.1.6, which predates every v2 read.
+    # when it is absent; 0.2.8 makes it conditional via #60.
     "aind-nwb-utils==0.2.8",
     # SyncDataset, for the multiplane 2p_vsync rising-edge extraction.
     "aind-behavior-utils==0.3.4",
     # pynwb 4 is REQUIRED, not merely tolerated: aind-nwb-utils>=0.2.6 declares
-    # pynwb>=4.0.0, so the capsule image's pynwb==2.8.3 could never coexist
-    # with it. Verified 2026-07-30 on 4.1.0 that every symbol consumed here
+    # pynwb>=4.0.0, so pynwb 2.x cannot coexist with it. Verified 2026-07-30 on 4.1.0 that every symbol consumed here
     # still exists (NWBFile, ImagingPlane, ImageSegmentation, OpticalChannel,
     # PlaneSegmentation, RoiResponseSeries, DfOverF, Fluorescence,
     # GrayscaleImage, Images, TimeIntervals, load_namespaces, get_class,
@@ -61,9 +59,9 @@ dependencies = [
     "hdmf==6.1.0",
     "hdmf-zarr==0.13.0",
     "h5py==3.16.0",
-    # numpy is ranged, not pinned: the capsule image pinned 1.26.4, which has no
-    # cp312 wheel. Only elementwise ufuncs, argmax, zeros/arange and boolean
-    # indexing are consumed here, all unchanged across 1.26 -> 2.x.
+    # numpy 1.26 has no cp312 wheel, so the pin is a 2.x release that installs
+    # on 3.10 / 3.11 / 3.12. Only elementwise ufuncs, argmax, zeros/arange and
+    # boolean indexing are consumed here.
     "numpy==2.2.6",
     # sparse is pinned. It is consumed for exactly one call --
     # sparse.COO(coords, data, shape).todense() -- but an unpinned range
@@ -115,12 +113,11 @@ exclude = '''
 '''
 
 [tool.coverage.run]
-# nwb_builders.py is the heavy pynwb/hdmf object construction and job.py the
-# orchestration; both need real upstream HDF5 payloads plus a writable Zarr
-# store (a Code Ocean data run), so they are omitted rather than diluting the
-# gate to an average. The light modules -- settings / file_handling / qc /
-# utils -- are held at 100%.
-omit = ["*__init__*", "*/nwb_builders.py", "*/job.py"]
+# nwb_builders.py and job.py are temporarily omitted -- inherited from a
+# production capsule without unit tests; exercising them fully needs real
+# upstream HDF5 payloads and a writable Zarr store. The light modules --
+# settings / file_handling / qc / utils -- are held at 100%.
+omit = ["*__init__*", "*/aind_ophys_nwb_library/nwb_builders.py", "*/aind_ophys_nwb_library/job.py"]
 source = ["aind_ophys_nwb_library", "tests"]
 
 [tool.coverage.report]
