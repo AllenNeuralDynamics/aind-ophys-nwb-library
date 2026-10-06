@@ -69,9 +69,8 @@ dependencies = [
     # and fails to install outright. 0.17.0 resolves numba 0.66.0 and installs
     # on 3.10 / 3.11 / 3.12.
     "sparse==0.17.0",
-    "imageio==2.37.4",
     "matplotlib==3.10.9",
-    "pandas==2.3.3",
+    "pydantic==2.11.10",
     "pydantic-settings==2.14.2",
     "pytz==2026.3.post1",
 ]
@@ -81,6 +80,7 @@ dev = [
     'black',
     'coverage',
     'flake8',
+    'imageio',
     'interrogate',
     'isort',
     'Sphinx',
