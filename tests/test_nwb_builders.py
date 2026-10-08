@@ -1,18 +1,4 @@
-"""Tests for the pynwb builders, driven by real upstream payloads.
-
-Every fixture here stands in for an upstream step's compute result, so it is
-built from the production type: ``numpy`` arrays written into real HDF5 files at
-the shapes extraction, dF/F, OASIS and the classifier actually emit. A Python
-list stands in for none of them -- ``x or default``, ``len(x or [])`` and
-``if x:`` all behave differently on an array, so a list-based fixture can pass
-while a real run raises ``ValueError: The truth value of an array with more
-than one element is ambiguous`` after compute has finished.
-
-``nwb_builders`` is coverage-omitted (it needs a writable Zarr store for the
-terminal write), so these tests target the array handling: the mask collapse,
-the HDF5 reads, the positional ROI pairing, the sync-timestamp split and the
-trace/timestamp length reconciliation.
-"""
+"""Tests for the pynwb builders over real HDF5 payloads."""
 
 import logging
 import shutil
@@ -700,7 +686,7 @@ class TestZarrRoundTrip(ExtractionFileCase):
     """The written store must re-open and report its planes."""
 
     def test_write_and_read_back(self) -> None:
-        """The QC ``reopened`` flag depends on this round trip."""
+        """The written store re-opens with its plane module."""
         plane = plane_metadata()
         metadata = nwb_metadata(self.root / "acquisition.json", [plane])
         nwbfile = NWBFile(

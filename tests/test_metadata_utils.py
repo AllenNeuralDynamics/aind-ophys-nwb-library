@@ -16,6 +16,8 @@ from aind_pophys_metadata.runner import stage_guard
 from aind_ophys_nwb_library.utils import metadata_utils as mu
 from tests import fixtures
 
+LIBRARY = "aind-ophys-nwb-library"
+
 
 def _write(directory: Path, name: str, payload: dict) -> None:
     """Write one JSON metadata file into ``directory``."""
@@ -307,25 +309,20 @@ class TestLoadNwbMetadata(unittest.TestCase):
 class TestCodeBlock(unittest.TestCase):
     """The Code block identifying which artifact produced the NWB."""
 
-    def test_url_is_the_library_landing_page(self) -> None:
-        """No /tree/main/code suffix and no branch ref."""
+    def test_identity_is_the_installed_library(self) -> None:
+        """name, version and url all describe this library's package."""
         code = mu.build_nwb_code({"input_dir": "/data"})
-        self.assertEqual(code.url, mu.CODE_URL)
-        self.assertEqual(
-            mu.CODE_URL,
-            f"https://github.com/AllenNeuralDynamics/{mu.LIBRARY_NAME}",
-        )
-
-    def test_version_is_non_empty(self) -> None:
-        """An empty version leaves the step with no code identity at all."""
-        self.assertTrue(mu.build_nwb_code({}).version)
+        self.assertEqual(code.name, LIBRARY)
+        self.assertEqual(code.version, version(LIBRARY))
+        self.assertTrue(code.version)
+        self.assertEqual(code.url, f"https://github.com/AllenNeuralDynamics/{LIBRARY}")
 
     def test_version_ignores_the_capsule_environment(self) -> None:
         """The backing library is authoritative, not the wrapper's VERSION."""
         with patch.dict(os.environ, {"VERSION": "1.2.3"}, clear=True):
             code = mu.build_nwb_code({})
         self.assertNotEqual(code.version, "1.2.3")
-        self.assertEqual(code.version, version(mu.LIBRARY_NAME))
+        self.assertEqual(code.version, version(LIBRARY))
 
     def test_parameters_round_trip_through_generic_model(self) -> None:
         """Code.parameters becomes a _GenericModel, read back via model_dump."""

@@ -1,24 +1,4 @@
-"""Top-level NWB packaging orchestration.
-
-``run()`` is the library entry point called by the thin runtime wrapper: read
-the acquisition metadata (v1 or v2) -> configure logging -> resolve every
-upstream step's artifacts -> build one NWB file covering every plane ->
-write it as a Zarr store -> emit a full ``processing.json`` and
-``quality_control.json``.
-
-Everything is written into ``<output_dir>/nwb/`` rather than at the results
-root. ``main.nf`` publishes with ``saveAs { new File(filename).getName() }``,
-which flattens every published path to its basename, so a root-level
-``processing.json`` would collide with the aggregator tier's. One subdirectory
-also matches the ``<subdir>/<step>`` shape every other v2 step adopted.
-
-There is exactly **one** ``processing.json`` and **one**
-``quality_control.json`` per run, not one per plane: ``main.nf`` calls this
-step once with every upstream channel ``.collect()``ed, so a run produces a
-single NWB file describing all planes. ``processing.json`` is written by the
-shared ``stage_guard``, which times the stage and emits a document whether or
-not the body raised, with the error in ``notes``.
-"""
+"""NWB packaging orchestration; :func:`run` is the library entry point."""
 
 import logging
 from pathlib import Path
@@ -32,7 +12,7 @@ from aind_pophys_metadata.processing import collect_upstream_process_names
 from aind_pophys_metadata.runner import StageContext, stage_guard
 from log_schema.main import setup_logging
 
-from . import file_handling, nwb_builders, qc
+from . import file_handling, nwb_builders
 from .settings import NwbSettings
 from .utils import metadata_utils as mu
 from .utils.metadata_utils import SessionType
@@ -49,11 +29,6 @@ VSYNC_LINES = ("2p_vsync", "vsync_2p")
 
 def _resolve_mount(input_dir: Path, subdir: str) -> Path:
     """Return ``input_dir/subdir``, falling back to ``input_dir`` itself.
-
-    In the pipeline the raw and processed assets are copied into
-    ``/data/raw`` and ``/data/processed``; in a standalone run they can be
-    mounted flat. Falling back keeps both usable instead of failing with a
-    misleading "no acquisition file" error.
 
     Parameters
     ----------
@@ -152,11 +127,9 @@ def _package_session(
     code: Code,
     ctx: StageContext,
 ) -> None:
-    """Build and write the NWB file plus its quality_control.json.
+    """Build and write the NWB file.
 
-    ``code`` and ``ctx`` are populated as the run progresses so the
-    ``processing.json`` the stage guard writes reports partial provenance even
-    when this raises.
+    ``code`` and ``ctx`` are populated as the run progresses.
     """
     import aind_nwb_utils.utils as nwb_utils
 
@@ -183,10 +156,9 @@ def _package_session(
     elif session is SessionType.SINGLE_PLANE_WITH_EPOCHS:
         nwb_builders.add_epoch_intervals(nwbfile, epoch_json, metadata.frame_rate)
 
-    metrics = []
     total_rois = 0
     for plane, plane_artifacts in zip(metadata.planes, artifacts):
-        contents, num_rois = nwb_builders.add_plane(
+        _, num_rois = nwb_builders.add_plane(
             nwbfile,
             metadata,
             plane,
@@ -196,8 +168,6 @@ def _package_session(
             timestamps=timestamps.get(plane[mu.PLANE_ID_KEY]),
         )
         total_rois += num_rois
-        plane_id = plane[mu.PLANE_ID_KEY]
-        metrics.append(qc.build_plane_contents_metric(plane_id, contents, num_rois))
 
     if session is SessionType.MULTIPLANE and not settings.skip_lab_metadata:
         nwb_builders.add_plane_lab_metadata(nwbfile, metadata.planes, settings.extension_namespace)
@@ -207,9 +177,6 @@ def _package_session(
     logger.info("Wrote %s", nwb_path)
 
     readable = _reopened(nwb_path, metadata.plane_ids)
-    metrics.append(qc.build_nwb_written_metric(metadata.plane_ids, nwb_reference, readable))
-    metrics.append(qc.build_nwb_review_metric(nwb_reference))
-    qc.write_quality_control_json(qc.build_quality_control(metrics), output_dir)
 
     # Scalar summary statistics describing THIS step's outputs, so a reviewer
     # can triage the run without opening the NWB store. Input parameters

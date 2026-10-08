@@ -11,16 +11,15 @@ NWB packaging of AIND planar / population ophys pipeline outputs.
 
 This is the backing library for the `aind-ophys-nwb` Code Ocean capsule: all the
 logic lives here with its own tests, and the capsule is a thin wrapper that calls
-`aind_ophys_nwb_library.job.run`. Metadata reads, the `Processing` builders and
-the QC document builders come from the shared
+`aind_ophys_nwb_library.job.run`. Metadata reads and the `Processing` builders
+come from the shared
 [`aind-pophys-metadata`](https://github.com/AllenNeuralDynamics/aind-pophys-metadata)
 package, so they stay consistent across the pipeline's steps.
 
 This is the pipeline's **terminal fan-in**. `main.nf` calls the NWB step once with
 every upstream channel `.collect()`ed, so one invocation sees every plane's
-outputs at the same time and produces exactly **one** NWB file, one
-`processing.json` and one `quality_control.json` for the whole session — not one
-per plane.
+outputs at the same time and produces exactly **one** NWB file and one
+`processing.json` for the whole session — not one per plane.
 
 ## What it does
 
@@ -43,7 +42,7 @@ per plane.
    per-plane timestamps with `sync_timestamps_per_plane()`. A single-plane
    session has no sync file and records the acquisition frame rate instead.
 7. Write the NWB Zarr store, re-open it to confirm every plane is present, and
-   emit `processing.json` and `quality_control.json`.
+   emit `processing.json`.
 
 ### Cross-step contracts
 
@@ -136,16 +135,6 @@ container. Also `find_epoch_locations()` and `find_sync_file()`. Kept
 import-light — pure path logic, so the upstream contract stays testable without
 pynwb or real HDF5 payloads.
 
-### `qc.py`
-
-Metric content for `quality_control.json`. Metric-producing functions
-(`build_plane_contents_metric()`, `build_nwb_written_metric()`,
-`build_nwb_review_metric()`) return metrics; `job.run` accumulates them and
-`write_quality_control_json()` writes one document for the session.
-`build_plane_contents_metric()` fails a plane that wrote no ROIs or is missing
-any of `REQUIRED_PLANE_CONTAINERS`, which is what makes a silently gutted NWB
-distinguishable from a complete one.
-
 ### `settings.py`
 
 `NwbSettings`. Kept import-light (pydantic plus stdlib) so it is cheap to import,
@@ -180,8 +169,6 @@ would collide with the aggregator tier's.
 
 - `pophys.nwb.zarr` (the `nwb_name` setting) — the packaged NWB Zarr store
 - `processing.json` — full v2 `Processing`, written by the shared `stage_guard`
-- `quality_control.json` — full v2 `QualityControl`, one metric per plane plus
-  the session-level written/review metrics
 
 Inside the NWB file, each plane gets a processing module named after its
 canonical plane id, holding:
@@ -200,9 +187,9 @@ A multiplane session also carries the per-plane `ndx-aibs-behavior-ophys` lab
 metadata; a single-plane session with `epoch_locations.json` carries an `epochs`
 time-intervals table instead.
 
-`processing.json` and `quality_control.json` are emitted through the shared
+`processing.json` is emitted through the shared
 [`aind-pophys-metadata`](https://github.com/AllenNeuralDynamics/aind-pophys-metadata)
-package, so their shape matches every other step in the pipeline.
+package, so its shape matches every other step in the pipeline.
 
 ## Level of Support
 Please indicate a level of support:

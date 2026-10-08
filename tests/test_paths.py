@@ -1,10 +1,4 @@
-"""Tests for the provenance path helper.
-
-Both sides must be resolved: inside a Nextflow task ``/results`` and
-``/data`` are symlinks into the work directory, and comparing a resolved
-root against an unresolved path leaks an absolute container path into the
-emitted metadata.
-"""
+"""Tests for the provenance path helper."""
 
 import os
 import tempfile

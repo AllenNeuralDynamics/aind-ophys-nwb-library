@@ -6,12 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "aind-ophys-nwb-library"
 description = "NWB packaging of AIND planar-ophys pipeline outputs"
 license = "MIT"
-# Floor: verified 2026-07-30 that every dependency below IMPORTS (not merely
-# installs) on 3.10.19, 3.11.14 and 3.12.12, and that pynwb 4.1.0 / hdmf 6.1.0
-# / hdmf-zarr 0.13.0 write and re-read a Zarr NWB file carrying this library's
-# full object graph plus the ndx-aibs-behavior-ophys extension.
-# Ceiling: aind-pophys-metadata declares requires-python ">=3.10,<3.13", so
-# 3.13+ is unsupported however well it happens to install.
 requires-python = ">=3.10,<3.13"
 authors = [
     {name = "Allen Institute for Neural Dynamics"}
@@ -23,57 +17,25 @@ readme = "README.md"
 version = "0.1.0"
 
 dependencies = [
-    # The two pins move together: aind-data-schema 2.9.0 requires
-    # aind-data-schema-models >=6.1.0,<7, while 2.8.1 pinned ==5.7.3 exactly,
-    # so bumping either alone leaves the environment unresolvable.
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@ba60ba340de7c273d7801d21c4d45fbb9bb7f45f",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
-    # Shared with the ephys pipeline and deliberately NOT absorbed here. It
-    # declares no aind-data-schema constraint at all, so it does not fight
-    # the exact pin, and its pyproject is byte-identical between 0.2.6 and
-    # 0.2.8.
-    #
-    # 0.2.8 is the FIRST release whose create_base_nwb_file can read a v2
-    # acquisition.json -- verified 2026-07-30 by diffing that one consumed
-    # symbol across tags. 0.2.6/0.2.7 read `session_metadata
-    # ["session_start_time"]` unconditionally (KeyError on a v2 file; the
-    # `acquisition_start_time` dispatch arrives in 0.2.8 via #55) AND require
-    # a processing.json in the metadata directory, raising
-    # `ValueError("Missing metadata file: ")` -- with the filename omitted --
-    # when it is absent; 0.2.8 makes it conditional via #60.
     "aind-nwb-utils==0.2.8",
-    # SyncDataset, for the multiplane 2p_vsync rising-edge extraction.
     "aind-behavior-utils==0.3.4",
-    # pynwb 4 is REQUIRED, not merely tolerated: aind-nwb-utils>=0.2.6 declares
-    # pynwb>=4.0.0, so pynwb 2.x cannot coexist with it. Verified 2026-07-30 on 4.1.0 that every symbol consumed here
-    # still exists (NWBFile, ImagingPlane, ImageSegmentation, OpticalChannel,
-    # PlaneSegmentation, RoiResponseSeries, DfOverF, Fluorescence,
-    # GrayscaleImage, Images, TimeIntervals, load_namespaces, get_class,
-    # ProcessingModule) and that the
-    # ndx-aibs-behavior-ophys namespace still loads and round-trips.
     "pynwb==4.1.0",
-    # hdmf is imported directly in nwb_builders.py (`from hdmf.common import
-    # VectorData`), so it is declared rather than relied on transitively.
     "hdmf==6.1.0",
     "hdmf-zarr==0.13.0",
     "h5py==3.16.0",
-    # numpy 1.26 has no cp312 wheel, so the pin is a 2.x release that installs
-    # on 3.10 / 3.11 / 3.12. Only elementwise ufuncs, argmax, zeros/arange and
-    # boolean indexing are consumed here.
     "numpy==2.2.6",
-    # sparse is pinned. It is consumed for exactly one call --
-    # sparse.COO(coords, data, shape).todense() -- but an unpinned range
-    # resolves to 0.19.0 on 3.12, which requires numba 0.53.1 (no cp312 wheel)
-    # and fails to install outright. 0.17.0 resolves numba 0.66.0 and installs
-    # on 3.10 / 3.11 / 3.12.
     "sparse==0.17.0",
     "matplotlib==3.10.9",
     "pydantic==2.11.10",
     "pydantic-settings==2.14.2",
-    "pytz==2026.3.post1",
 ]
+
+[project.urls]
+Repository = "https://github.com/AllenNeuralDynamics/aind-ophys-nwb-library"
 
 [dependency-groups]
 dev = [
@@ -97,8 +59,8 @@ exclude = '''
 
 (
   /(
-      \.eggs         # exclude a few common directories in the
-    | \.git          # root of the project
+      \.eggs
+    | \.git
     | \.hg
     | \.mypy_cache
     | \.tox
@@ -113,10 +75,6 @@ exclude = '''
 '''
 
 [tool.coverage.run]
-# nwb_builders.py and job.py are temporarily omitted -- inherited from a
-# production capsule without unit tests; exercising them fully needs real
-# upstream HDF5 payloads and a writable Zarr store. The light modules --
-# settings / file_handling / qc / utils -- are held at 100%.
 omit = ["*__init__*", "*/aind_ophys_nwb_library/nwb_builders.py", "*/aind_ophys_nwb_library/job.py"]
 source = ["aind_ophys_nwb_library", "tests"]
 

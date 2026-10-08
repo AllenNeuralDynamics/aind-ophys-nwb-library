@@ -1,17 +1,4 @@
-"""Tests for upstream-artifact discovery.
-
-This is the cross-step contract layer, so the fixtures below mirror the
-directory layouts the v2 writers actually produce:
-
-* ``<plane>/extraction/<plane>_extraction.h5``  (aind-ophys-extraction)
-* ``<plane>/dff/<plane>_dff.h5``                (aind-ophys-dff)
-* ``<plane>/events/<plane>_events_oasis.h5``    (aind-ophys-oasis-event-detection)
-* ``<plane>/classification/<plane>_classification.h5`` (aind-ophys-classifier)
-* ``<plane>/motion_correction/<plane>_*_projection.png`` (motion correction)
-
-and the flat v1 layout, to prove the recursive filename-keyed glob resolves
-both.
-"""
+"""Tests for upstream-artifact discovery over the v1 and v2 layouts."""
 
 import logging
 import tempfile

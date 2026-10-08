@@ -1,16 +1,4 @@
-"""CLI/environment settings for NWB packaging of ophys pipeline outputs.
-
-Kept import-light (pydantic + stdlib only) so it stays cheap to import, free
-of pynwb / hdmf-zarr / aind-data-schema side effects, and discoverable by
-``auto-app-panel`` without the heavy dependencies installed.
-
-Every field name is at least two characters: pydantic-settings renders a
-one-character field as a *short* option (``-i``), which a Code Ocean app panel
-can never emit because it only produces ``--name=value``.
-
-``input_dir`` / ``output_dir`` match every other library in the pipeline, so
-the pipeline's ``ophys_nwb`` invocation must pass those names.
-"""
+"""CLI/environment settings for NWB packaging."""
 
 from pathlib import Path
 
@@ -19,8 +7,7 @@ from pydantic_settings import BaseSettings
 
 DEFAULT_EXTENSION_NAMESPACE = Path("ndx-aibs-behavior-ophys.namespace.yaml")
 
-#: Settings field whose value is a filesystem path that only exists for the
-#: lifetime of one task, so only its basename is recorded as provenance.
+#: Settings field recorded by basename only.
 EPHEMERAL_PATH_FIELD = "extension_namespace"
 
 
@@ -29,11 +16,7 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
 
     input_dir: Path = Field(
         default=Path("/data"),
-        description=(
-            "Directory holding the mounted inputs. Expected to contain a "
-            "'raw' subdirectory with the core acquisition metadata and a "
-            "'processed' subdirectory with every upstream step's output."
-        ),
+        description="Directory holding the 'raw' and 'processed' input subdirectories.",
     )
     output_dir: Path = Field(
         default=Path("/results"),
@@ -41,53 +24,32 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
     )
     raw_subdir: str = Field(
         default="raw",
-        description=(
-            "Name of the subdirectory of input_dir holding the raw asset "
-            "(core metadata, sync file, pophys movies)."
-        ),
+        description="Subdirectory of input_dir holding the raw asset.",
     )
     processed_subdir: str = Field(
         default="processed",
-        description=(
-            "Name of the subdirectory of input_dir holding every upstream step's results."
-        ),
+        description="Subdirectory of input_dir holding the upstream step results.",
     )
     nwb_name: str = Field(
         default="pophys.nwb.zarr",
-        description=(
-            "Basename of the NWB Zarr store written inside output_dir. It is "
-            "written into a subdirectory, never at the results root, so that "
-            "the pipeline's basename-flattening publishDir cannot collide."
-        ),
+        description="Basename of the NWB Zarr store, written under output_dir/nwb.",
     )
     extension_namespace: Path = Field(
         default=DEFAULT_EXTENSION_NAMESPACE,
         description=(
-            "Path to the ndx-aibs-behavior-ophys namespace YAML that defines "
-            "the per-plane OphysMetadataSchema lab metadata. Resolved "
-            "relative to the working directory (the Code Ocean capsule's code/ folder) "
-            "when not absolute."
+            "ndx-aibs-behavior-ophys namespace YAML defining the per-plane lab "
+            "metadata; a relative path resolves against the working directory."
         ),
     )
     skip_lab_metadata: bool = Field(
         default=False,
-        description=(
-            "Skip the ndx-aibs-behavior-ophys per-plane lab metadata. Use "
-            "only when the extension YAML is unavailable; the resulting NWB "
-            "omits imaging_depth / imaging_plane_group / field_of_view_*."
-        ),
+        description="Skip the ndx-aibs-behavior-ophys per-plane lab metadata.",
     )
 
     def recorded_parameters(self) -> dict:
         """Return the settings as recorded in ``Code.parameters``.
 
-        ``extension_namespace`` is reduced to its basename. In the pipeline
-        the step is handed the resolved YAML inside its Nextflow task
-        scratch directory (``/tmp/nxf.<run>/capsule/code/...``), a path that
-        is destroyed with the task, so recording it verbatim would put a
-        dangling absolute path into permanent metadata. The basename still
-        identifies which extension was loaded, which is the provenance that
-        matters.
+        ``extension_namespace`` is reduced to its basename.
 
         Returns
         -------

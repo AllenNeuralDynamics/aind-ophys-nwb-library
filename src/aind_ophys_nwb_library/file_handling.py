@@ -1,19 +1,4 @@
-"""Discovery of the upstream step outputs this library repackages.
-
-This is the pipeline's terminal fan-in: ``main.nf`` calls the NWB step once
-with every upstream channel ``.collect()``ed, so one run sees every plane's
-outputs from motion correction, decrosstalk, extraction, classification, dF/F
-and OASIS event detection at the same time.
-
-Each of those steps writes ``<plane_id>/<step>/<plane_id>_<artifact>``
-under its results root, and the pipeline copies all of them into one
-``processed`` mount. v2 changed the *directory* nesting but kept the
-``<plane_id>_`` filename prefix, so this module globs recursively on the
-filename rather than walking a fixed directory layout.
-
-Kept import-light: every function here is pure path logic, so the upstream
-contract stays testable without pynwb or real HDF5 payloads.
-"""
+"""Discovery of the upstream step artifacts packaged into the NWB file."""
 
 import logging
 from dataclasses import dataclass
@@ -54,10 +39,7 @@ EPOCH_LOCATIONS_JSON = "epoch_locations.json"
 class PlaneArtifacts:
     """Resolved upstream artifact paths for one imaging plane.
 
-    Only ``extraction_h5`` is guaranteed non-``None``; the rest are optional
-    because a plane can legitimately be missing dF/F, events, classification
-    or projections (an upstream stage was skipped or failed) and the NWB should
-    still carry what does exist.
+    Only ``extraction_h5`` is guaranteed non-``None``.
     """
 
     plane_id: str
@@ -84,8 +66,7 @@ def find_artifact(
         Artifact filename suffix, e.g. ``"extraction.h5"``.
     plane_id : str, optional
         Canonical plane id. When given, only files whose name starts with
-        ``f"{plane_id}_"`` match, which is what keeps two planes' artifacts
-        from being confused. When ``None`` the prefix is not required.
+        ``f"{plane_id}_"`` match. When ``None`` the prefix is not required.
 
     Returns
     -------
@@ -162,12 +143,9 @@ def collect_plane_artifacts(
     ------
     FileNotFoundError
         If a required artifact cannot be located; the message names the glob
-        pattern and the directory searched, because a bare ``StopIteration``
-        or ``None`` is the least debuggable failure in the pipeline.
+        pattern and the directory searched.
     ValueError
-        If ``allow_unprefixed`` and more than one unprefixed candidate matches:
-        the metadata resolved a single plane but the mount is ambiguous, so
-        guessing would publish one plane's data under another plane's name.
+        If ``allow_unprefixed`` and more than one unprefixed candidate matches.
     """
     resolved: Dict[str, Optional[Path]] = {}
     for key, part in ARTIFACT_PARTS.items():
@@ -238,8 +216,7 @@ def collect_session_artifacts(
     Raises
     ------
     ValueError
-        If ``plane_ids`` is empty -- there would be nothing to package, and
-        silently writing an empty NWB hides a metadata read failure.
+        If ``plane_ids`` is empty.
     """
     if not plane_ids:
         raise ValueError(
@@ -260,9 +237,6 @@ def collect_session_artifacts(
 def find_epoch_locations(search_root: Path) -> Optional[Path]:
     """Locate an ``epoch_locations.json`` under the processed mount.
 
-    Written by motion correction for single-plane sessions that carry
-    photostim/spontaneous epochs.
-
     Parameters
     ----------
     search_root : Path
@@ -279,9 +253,8 @@ def find_epoch_locations(search_root: Path) -> Optional[Path]:
 def find_sync_file(raw_root: Path) -> Optional[Path]:
     """Locate the raw sync HDF5 file for a multiplane session.
 
-    Patterns are tried in order -- ``*pophys/data_main.h5``, then
-    ``behavior/*.h5``, then any ``*ophys/*.h5`` -- matching the layout the
-    transfer service produces for each acquisition style.
+    Patterns are tried in order: ``*pophys/data_main.h5``, ``behavior/*.h5``,
+    then ``*ophys/*.h5``.
 
     Parameters
     ----------

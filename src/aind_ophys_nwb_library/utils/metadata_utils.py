@@ -1,19 +1,4 @@
-"""Metadata reads for NWB packaging, on top of the shared read layer.
-
-:class:`aind_pophys_metadata.CoreMetadata` owns file discovery, schema-version
-dispatch, the canonical plane ids and every per-plane imaging field; this module
-adds only what is NWB-specific: the ``ImagingPlane.location`` string, the
-indicator read from ``procedures.json``, the session-type fork and the
-``Processing`` builders for this step.
-
-Two invariants shape the design:
-
-* **No schema version is compared here.** ``CoreMetadata`` answers the same
-  questions for v1, v2 and minimal input alike, so nothing downstream learns
-  which document it was given.
-* **Reads are raw dicts.** Nothing here calls ``model_validate`` on an input
-  file; messy-but-sufficient metadata must still package.
-"""
+"""NWB packaging metadata reads over the shared ``CoreMetadata``."""
 
 import logging
 from dataclasses import dataclass
@@ -28,20 +13,10 @@ from aind_pophys_metadata import processing as shared_processing
 
 logger = logging.getLogger(__name__)
 
-#: ``Code.name``, and the ``process_name`` logging context. The matching
-#: ``Code.url`` and ``Code.version`` are derived by the shared builder from
-#: :data:`LIBRARY_NAME` alone, never from this string.
+#: ``process_name`` logging context.
 PROCESS_NAME = "aind-ophys-nwb"
 
-#: Distribution name of this backing library, used by the shared builder to
-#: resolve a version from installed package metadata when none is supplied.
-LIBRARY_NAME = "aind-ophys-nwb-library"
-
 PROCEDURES_FILE = "procedures.json"
-
-#: ``Code.url``. Only this repo knows where its own code lives, so the shared
-#: builder no longer derives it from :data:`LIBRARY_NAME`.
-CODE_URL = "https://github.com/AllenNeuralDynamics/aind-ophys-nwb-library"
 
 #: Key added to each shared plane record, pairing it with its canonical id.
 PLANE_ID_KEY = "plane_id"
@@ -57,11 +32,7 @@ DATA_PROCESS_NAME = "NWB packaging"
 class SessionType(Enum):
     """How the acquisition is packaged into NWB.
 
-    The fork is decided by **plane count**, not by
-    ``data_description.platform`` (a v1-only field that v2 removed) and not by
-    ``instrument_id``. Plane count is also what
-    :func:`aind_pophys_metadata.build_fov_ids` uses to choose the
-    plane-naming scheme, so routing and naming agree by construction.
+    Decided by plane count.
     """
 
     MULTIPLANE = "multiplane"
@@ -80,8 +51,7 @@ def plane_location(plane: Dict[str, Any]) -> str:
     Returns
     -------
     str
-        The location string; missing fields read as ``unknown`` rather than
-        rendering ``None`` into the NWB file.
+        The location string; missing fields read as ``unknown``.
     """
     structure = plane.get("structure") or "unknown"
     depth = plane.get("depth")
@@ -92,16 +62,8 @@ def plane_location(plane: Dict[str, Any]) -> str:
 class NwbMetadata:
     """Minimal metadata the NWB packaging step consumes.
 
-    ``planes`` and ``frame_rate`` are the only required fields: the planes name
-    the NWB processing modules and drive the upstream artifact globs, and the
-    frame rate sets every ``ImagingPlane.imaging_rate`` (and the single-plane
-    trace sampling rate, where there is no sync file). The identifiers are
-    logging context and stay optional. ``schema_version`` is provenance for
-    logs and error messages; nothing branches on it.
-
-    Each entry of ``planes`` is a shared plane record dict carrying the extra
-    ``plane_id`` key this library pairs onto it, so the records are ordered by
-    ``plane_index`` and their ids are the canonical ones.
+    Each entry of ``planes`` is a shared plane record with an added
+    ``plane_id`` key, ordered by ``plane_index``.
     """
 
     schema_version: str
@@ -178,10 +140,7 @@ def _walk_for_material(node: Any) -> Optional[str]:
 def get_injection_material(procedures_raw: Optional[dict]) -> Optional[str]:
     """First injected material name found anywhere in ``procedures.json``.
 
-    Searched recursively rather than at the v1 path
-    ``subject_procedures[0].procedures[*].injection_materials[0].name``,
-    because v2 moved the procedure content under ``components`` and re-nested
-    it; a recursive search reads both shapes without a version branch.
+    Searched recursively, so the v1 and v2 procedure layouts both resolve.
 
     Parameters
     ----------
@@ -222,10 +181,6 @@ def session_type(plane_count: int, has_epochs: bool) -> SessionType:
 def identified_planes(core: CoreMetadata) -> Tuple[Dict[str, Any], ...]:
     """Order the shared plane records and pair each with its canonical id.
 
-    ``get_plane_records`` is unsorted and carries no id, while
-    ``get_fov_ids`` is ordered by plane index, so the two are zipped after
-    sorting.
-
     Parameters
     ----------
     core : aind_pophys_metadata.CoreMetadata
@@ -247,8 +202,7 @@ def identified_planes(core: CoreMetadata) -> Tuple[Dict[str, Any], ...]:
 def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
     """Read metadata for NWB packaging from the raw mount.
 
-    The shared layer locates the core file, normalizes it and falls back to
-    ``platform.json`` for the frame rate when the core file omits it.
+    The frame rate falls back to ``platform.json`` when the core file omits it.
 
     Parameters
     ----------
@@ -305,10 +259,7 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
 def build_nwb_code(parameters: dict) -> Code:
     """Construct the v2 ``Code`` block for NWB packaging.
 
-    ``input_data`` is not set here: the upstream artifacts are only resolved
-    once the run is under way, while the code block must exist before it so
-    that a failure still yields a ``processing.json``. Attach them later with
-    :func:`attach_input_data`.
+    ``input_data`` is attached later with :func:`attach_input_data`.
 
     Parameters
     ----------
@@ -320,12 +271,7 @@ def build_nwb_code(parameters: dict) -> Code:
     Code
         The populated code block.
     """
-    return shared_processing.build_code(
-        name=PROCESS_NAME,
-        library_name=LIBRARY_NAME,
-        url=CODE_URL,
-        parameters=parameters,
-    )
+    return shared_processing.build_code(__name__, parameters=parameters)
 
 
 def attach_input_data(code: Code, input_data: List[str]) -> None:

@@ -1,22 +1,4 @@
-"""pynwb object construction from upstream ophys pipeline artifacts.
-
-Multiplane and single-plane sessions share one :func:`add_plane`, parameterised
-by the timing source and the container-name suffix, so a fix cannot land on one
-path and miss the other. The microscope device is described from the acquisition
-metadata's ``instrument_id``, which the shared read layer supplies for both
-schema versions.
-
-An optional artifact that cannot be read is logged and its NWB container
-omitted; the extraction traces, without which there is nothing to package,
-raise instead.
-
-Verified 2026-07-30 against pynwb 4.1.0 / hdmf 6.1.0 / hdmf-zarr 0.13.0: every
-symbol below exists and the resulting object graph round-trips through
-``NWBZarrIO``.
-
-Coverage-omitted (see pyproject): it needs real HDF5 payloads and a writable
-Zarr store, i.e. a Code Ocean data run.
-"""
+"""pynwb object construction from upstream ophys pipeline artifacts."""
 
 import json
 import logging
@@ -89,9 +71,7 @@ def load_pynwb_extension(path: Path) -> type:
     Parameters
     ----------
     path : Path
-        Path to ``ndx-aibs-behavior-ophys.namespace.yaml``. It must live under
-        the Code Ocean capsule's ``code/`` directory: ``main.nf`` stages only ``code/``,
-        so a file anywhere else in the repo is absent in every pipeline run.
+        Path to ``ndx-aibs-behavior-ophys.namespace.yaml``.
 
     Returns
     -------
@@ -101,8 +81,7 @@ def load_pynwb_extension(path: Path) -> type:
     Raises
     ------
     FileNotFoundError
-        If the namespace YAML is missing, named so the failure is one line to
-        diagnose rather than a pynwb parse error.
+        If the namespace YAML is missing.
     """
     path = Path(path)
     if not path.is_file():
@@ -266,9 +245,6 @@ def segmentation_approach(extraction_h5: Path) -> SegmentationApproach:
 def instrument_description(instrument_id: Optional[str]) -> str:
     """Describe the microscope from its instrument id.
 
-    Replaces the v1 read of ``rig.json`` (a v1-only file; v2 renamed it to
-    ``instrument.json`` and ``rig_id`` to ``instrument_id``).
-
     Parameters
     ----------
     instrument_id : str or None
@@ -381,9 +357,8 @@ def _classification_columns(
 ) -> Optional[Dict[str, np.ndarray]]:
     """Load the per-ROI classification columns, or ``None`` when unusable.
 
-    Pairing with the ROI masks is **positional** (suite2p order) -- the
-    cross-step contract with ``aind-ophys-classifier`` -- so a length
-    mismatch is rejected rather than silently truncated.
+    Columns pair with the ROI masks by position; a length mismatch returns
+    ``None``.
 
     Parameters
     ----------
@@ -442,9 +417,7 @@ def _extraction_columns(
 ) -> Dict[str, np.ndarray]:
     """Load the per-ROI columns that come from ``extraction.h5`` itself.
 
-    Always returns a full set: any dataset the extraction run did not produce
-    (notably on its CaImAn branch, where ``stat = {}``) becomes an all-NaN
-    column rather than removing the column entirely.
+    A dataset absent from the extraction file becomes an all-NaN column.
 
     Parameters
     ----------
@@ -563,10 +536,7 @@ def _add_neuropil_segmentation(
 def _as_grayscale(image: np.ndarray, path: Path) -> np.ndarray:
     """Reduce a decoded PNG to the 2-D array ``GrayscaleImage`` requires.
 
-    Motion correction writes 2-D uint8 projections via ``PIL.Image.fromarray``,
-    so this is normally a no-op. A colour-mapped PNG decodes to ``(H, W, 3|4)``
-    and would abort the whole terminal stage inside ``GrayscaleImage``, so it is
-    collapsed to its first channel with a warning instead.
+    A multi-channel image is reduced to its first channel, with a warning.
 
     Parameters
     ----------
@@ -663,9 +633,6 @@ def _series_kwargs(
 ) -> Dict[str, Any]:
     """Return the timing kwargs for a RoiResponseSeries.
 
-    Multiplane sessions carry per-plane sync timestamps; single-plane sessions
-    have no sync file and fall back to the acquisition frame rate.
-
     Parameters
     ----------
     timestamps : numpy.ndarray or None
@@ -693,9 +660,8 @@ def _add_traces(
 ) -> Dict[str, bool]:
     """Add every available trace container for one plane.
 
-    ``traces/roi`` and ``traces/neuropil`` come from the extraction file and
-    are required -- without them the plane has no timeseries at all. The
-    corrected, dF/F and event traces are optional.
+    ``traces/roi`` and ``traces/neuropil`` are required; the corrected, dF/F
+    and event traces are optional.
 
     Parameters
     ----------
@@ -716,7 +682,7 @@ def _add_traces(
     Returns
     -------
     dict of str to bool
-        Which containers were added, for the QC metric.
+        Which containers were added.
 
     Raises
     ------
@@ -826,7 +792,7 @@ def add_plane(
     Returns
     -------
     dict of str to bool
-        Which NWB containers this plane contributed, for QC.
+        Which NWB containers this plane contributed.
     int
         The number of ROIs written.
     """
@@ -915,9 +881,8 @@ def sync_timestamps_per_plane(
 ) -> Dict[str, np.ndarray]:
     """Split multiplane sync edges into per-plane timestamp arrays.
 
-    Mesoscope planes are acquired in coupled pairs, so the vsync edge train is
-    decimated by the number of temporal groups and offset by each plane's
-    ``coupled_plane_index`` (v1 ``coupled_fov_index``).
+    The vsync edge train is decimated by the number of plane pairs and offset
+    by each plane's pair index (``coupled_plane_index``).
 
     Parameters
     ----------
@@ -935,9 +900,7 @@ def sync_timestamps_per_plane(
     ------
     ValueError
         If the plane count is odd, or if a plane's coupled index does not match
-        its position -- either means the acquisition metadata and the coupling
-        assumption disagree, and silently mis-timestamping every trace is worse
-        than failing.
+        its position.
     """
     count = len(planes)
     if count % 2 != 0:
