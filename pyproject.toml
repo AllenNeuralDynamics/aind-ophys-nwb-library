@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aind-ophys-nwb-library"
-description = "Generated from aind-library-template"
+description = "NWB packaging of AIND planar-ophys pipeline outputs"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 authors = [
     {name = "Allen Institute for Neural Dynamics"}
 ]
@@ -17,6 +17,21 @@ readme = "README.md"
 version = "0.1.0"
 
 dependencies = [
+    "aind-data-schema==2.9.0",
+    "aind-data-schema-models==6.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.2.0",
+    "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
+    "aind-nwb-utils==0.2.8",
+    "aind-behavior-utils==0.3.4",
+    "pynwb==4.1.0",
+    "hdmf==6.1.0",
+    "hdmf-zarr==0.13.0",
+    "h5py==3.16.0",
+    "numpy==2.2.6",
+    "sparse==0.17.0",
+    "matplotlib==3.10.9",
+    "pydantic==2.11.10",
+    "pydantic-settings==2.14.2",
 ]
 
 [dependency-groups]
@@ -24,6 +39,7 @@ dev = [
     'black',
     'coverage',
     'flake8',
+    'imageio',
     'interrogate',
     'isort',
     'Sphinx',
@@ -34,14 +50,14 @@ dev = [
 where = ["src"]
 
 [tool.black]
-line-length = 79
+line-length = 100
 target_version = ['py310']
 exclude = '''
 
 (
   /(
-      \.eggs         # exclude a few common directories in the
-    | \.git          # root of the project
+      \.eggs
+    | \.git
     | \.hg
     | \.mypy_cache
     | \.tox
@@ -56,7 +72,7 @@ exclude = '''
 '''
 
 [tool.coverage.run]
-omit = ["*__init__*"]
+omit = ["*__init__*", "*/aind_ophys_nwb_library/nwb_builders.py", "*/aind_ophys_nwb_library/job.py"]
 source = ["aind_ophys_nwb_library", "tests"]
 
 [tool.coverage.report]
@@ -69,7 +85,7 @@ exclude_lines = [
 fail_under = 100
 
 [tool.isort]
-line_length = 79
+line_length = 100
 profile = "black"
 skip = [".conda", ".venv"]
 
