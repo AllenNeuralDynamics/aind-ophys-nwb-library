@@ -156,10 +156,6 @@ the shared layer does not normalize. `build_nwb_code()` builds this step's
 they are known. Reads are raw dicts — nothing here calls `model_validate` on an
 input file, so messy-but-sufficient metadata still packages.
 
-### `utils/paths.py`
-
-Alias re-exporting `relative_to_root` from `aind_pophys_metadata`.
-
 ## Outputs
 
 Everything is written under `<output_dir>/nwb/`, never at the results root:
