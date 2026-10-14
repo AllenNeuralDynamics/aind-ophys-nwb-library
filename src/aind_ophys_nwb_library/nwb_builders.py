@@ -1660,34 +1660,6 @@ def get_frame_rate(session: dict):
     return frame_rate_hz
 
 
-def parse_args() -> argparse.Namespace:
-    """
-    Parse command line arguments
-    Returns
-    -------
-    argparse.Namespace
-        The parsed arguments
-    """
-    parser = argparse.ArgumentParser(
-        description="Convert ophys dataset to NWB"
-    )
-
-    parser.add_argument(
-        "--input_directory",
-        type=str,
-        help="Path to the input directory",
-        default="/data/",
-    )
-
-    parser.add_argument(
-        "--output_directory",
-        type=str,
-        help="Path to the output file",
-        default="/results/",
-    )
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
     args = parse_args()
     input_directory = Path(args.input_directory)
