@@ -1211,102 +1211,6 @@ def nwb_ophys(
     return nwbfile
 
 
-def find_latest_processed_folder(input_directory: Path) -> Path:
-    """
-    Find the latest processed asset in the /data directory,
-        supporting both singleplane and multiplane.
-
-    Parameters
-    ----------
-    input_directory : Path
-        The directory to search for processed assets.
-
-    Returns
-    -------
-    Path
-        The path to the latest processed asset.
-    """
-    processed_folders = sorted(
-        [
-            folder
-            for folder in input_directory.rglob("processed/*")
-            if folder.is_dir()
-        ],
-        key=lambda x: x.stat().st_mtime,
-        reverse=True,
-    )
-    return processed_folders[0]  # Latest processed singleplane folder
-
-
-def find_latest_raw_folder(input_directory: Path) -> Path:
-    """
-    Find the latest raw asset in the /data directory,
-        supporting both singleplane and multiplane.
-
-    Parameters
-    ----------
-    input_directory : Path
-        The directory to search for raw assets.
-
-    Returns
-    -------
-    Path
-        The path to the latest raw asset.
-    """
-    # Look for general raw folders (singleplane case)
-    raw_folders = sorted(
-        [
-            folder
-            for folder in input_directory.glob("*raw/*")
-            if folder.is_dir()
-        ],
-        key=lambda x: x.stat().st_mtime,
-        reverse=True,
-    )
-
-    if raw_folders:
-        return raw_folders[0]  # Latest raw singleplane folder
-
-    # If no explicit "raw" folder,
-    # assume any folder without "processed" is raw
-    all_folders = sorted(
-        [
-            folder
-            for folder in input_directory.glob("*")
-            if folder.is_dir() and "processed" not in folder.name
-        ],
-        key=lambda x: x.stat().st_mtime,
-        reverse=True,
-    )
-
-    if all_folders:
-        return all_folders[0]  # Latest folder assuming it's raw
-
-    raise FileNotFoundError(
-        "No matching raw folder found in the input directory."
-    )
-
-
-def find_epoch_locations(processed_path: Path) -> "Path | None":
-    """Locate an epoch_locations.json file under the processed folder.
-
-    Parameters
-    ----------
-    processed_path : Path
-        The processed-data root for the session.
-
-    Returns
-    -------
-    Path or None
-        Path to the first epoch_locations.json found, or None if absent.
-    """
-    candidates = list(
-        processed_path.glob("*/motion_correction/epoch_locations.json")
-    )
-    candidates += list(processed_path.glob("epoch_locations.json"))
-    return candidates[0] if candidates else None
-
-
 def sync_times_to_multiplane_fovs(
     ophys_fovs: list, sync_timestamps: np.array
 ) -> list:
@@ -1341,62 +1245,6 @@ def sync_times_to_multiplane_fovs(
     return ophys_fovs
 
 
-def get_processed_file_paths(
-    processed_path: Path, raw_path: Path, fovs: List, single_plane: bool
-) -> dict:
-    """Get the paths to the processed files,
-       distinguishing between singleplane and multiplane.
-
-    Parameters
-    ----------
-    processed_path : Path
-        The path to the processed folder.
-    raw_path : Path
-        The path to the raw folder.
-    fovs : List
-        The list of fovs for processed data.
-    single_plane: bool
-        Whether the path is single-plane
-
-    Returns
-    -------
-    dict
-        The paths to the processed files.
-    """
-    file_paths = defaultdict(dict)
-
-    # Determine if it's a singleplane session based on folder name
-    is_singleplane = single_plane
-
-    if is_singleplane:
-        # Singleplane case: processed_path itself contains the data
-        plane_key = processed_path.name  # Use the folder name as the key
-        file_paths["planes"][plane_key] = (
-            file_handling.singleplane_session_data_files(processed_path)
-        )
-        file_paths["planes"][plane_key][
-            "processed_plane_path"
-        ] = processed_path
-    else:
-        # Multiplane case: Extract plane folders
-        processed_plane_paths = file_handling.plane_paths_from_session(
-            processed_path,
-            data_level="processed",
-            fovs=fovs,
-            single_plane=False,
-        )
-        for plane_path in processed_plane_paths:
-            file_paths["planes"][plane_path] = (
-                file_handling.multiplane_session_data_files(
-                    processed_path, plane_path
-                )
-            )
-        file_paths["planes"][plane_path]["processed_plane_path"] = plane_path
-    file_paths["processed_path"] = processed_path
-    file_paths["raw_path"] = raw_path
-    return file_paths
-
-
 def _sync_timestamps(sync_fp: Path) -> np.array:
     """Get the sync timestamps from the sync file
     Parameters
@@ -1421,38 +1269,6 @@ def _sync_timestamps(sync_fp: Path) -> np.array:
             line="vsync_2p",
             units="seconds"
         )
-
-
-def get_sync_timestamps(raw_path: Path) -> np.array:
-    """Get the sync timestamps from the appropriate sync file.
-
-    Parameters
-    ----------
-    raw_path : Path
-        The path to the raw folder.
-
-    Returns
-    -------
-    np.array
-        The sync timestamps.
-    """
-    # Single-plane check: Look for `data_main.h5`
-    sync_fp = next(raw_path.rglob("*pophys/data_main.h5"), None)
-
-    if not sync_fp:
-        # Check for the usual multiplane sync files
-        sync_fp = next(raw_path.rglob("behavior/*.h5"), None)
-    if not sync_fp:
-        sync_fp = next(raw_path.rglob("*ophys/*.h5"), None)
-
-    if not sync_fp:
-        logging.error(
-            "Sync file not found in behavior, *ophys, or single-plane folder"
-        )
-        raise FileNotFoundError(
-            "Sync file not found in behavior, *ophys, or single-plane folder"
-        )
-    return _sync_timestamps(sync_fp)
 
 
 def add_intervals_sp_nwb(json_path, frame_rate, nwbfile):
