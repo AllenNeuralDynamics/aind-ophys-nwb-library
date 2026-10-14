@@ -1,9 +1,10 @@
 """pynwb object construction from upstream ophys pipeline artifacts."""
 
+import json
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import h5py
 import matplotlib.pyplot as plt
@@ -13,16 +14,21 @@ import sparse
 from hdmf.common import VectorData
 from hdmf_zarr import NWBZarrIO
 from pynwb import NWBFile
-from pynwb.image import GrayscaleImage
+from pynwb.epoch import TimeIntervals
+from pynwb.image import GrayscaleImage, Images
+from pynwb.base import ProcessingModule
 from pynwb.ophys import (
+    DfOverF,
+    Fluorescence,
     ImageSegmentation,
     ImagingPlane,
     OpticalChannel,
     PlaneSegmentation,
+    RoiResponseSeries,
 )
 
 from .file_handling import PlaneArtifacts
-from .utils.metadata_utils import NwbMetadata
+from .utils.metadata_utils import NwbMetadata, plane_location
 
 logger = logging.getLogger(__name__)
 
@@ -634,6 +640,387 @@ def _summary_images(
     return images
 
 
+def _series_kwargs(
+    timestamps: Optional[np.ndarray],
+    frame_rate: float,
+) -> Dict[str, Any]:
+    """Return the timing kwargs for a RoiResponseSeries.
+
+    Parameters
+    ----------
+    timestamps : numpy.ndarray or None
+        Per-frame timestamps for this plane, or ``None``.
+    frame_rate : float
+        Acquisition frame rate in Hz.
+
+    Returns
+    -------
+    dict
+        Either ``{"timestamps": ...}`` or ``{"rate": ..., "starting_time": 0}``.
+    """
+    if timestamps is not None:
+        return {"timestamps": timestamps}
+    return {"rate": float(frame_rate), "starting_time": 0.0}
+
+
+def _add_traces(
+    module: ProcessingModule,
+    artifacts: PlaneArtifacts,
+    plane_segmentation: PlaneSegmentation,
+    num_rois: int,
+    suffix: str,
+    timing: Dict[str, Any],
+) -> Dict[str, bool]:
+    """Add every available trace container for one plane.
+
+    ``traces/roi`` and ``traces/neuropil`` are required; the corrected, dF/F
+    and event traces are optional.
+
+    Parameters
+    ----------
+    module : pynwb.base.ProcessingModule
+        The plane's processing module.
+    artifacts : PlaneArtifacts
+        Resolved upstream artifacts.
+    plane_segmentation : pynwb.ophys.PlaneSegmentation
+        Segmentation table the series reference.
+    num_rois : int
+        Expected ROI count; every trace array must agree.
+    suffix : str
+        Container-name suffix (``""`` single-plane, ``"_timeseries"`` multi),
+        preserving the v1 naming of both paths.
+    timing : dict
+        Timing kwargs from :func:`_series_kwargs`.
+
+    Returns
+    -------
+    dict of str to bool
+        Which containers were added.
+
+    Raises
+    ------
+    KeyError
+        If the extraction file has no ``traces/roi`` dataset.
+    ValueError
+        If a trace array's ROI count disagrees with the mask count.
+    """
+    added = {name: False for name in ("roi_fluorescence", "neuropil_fluorescence", "dff", "events")}
+
+    def series(name: str, data: np.ndarray, unit: str) -> RoiResponseSeries:
+        """Build one RoiResponseSeries over the plane's ROI table region."""
+        if data.shape[0] != num_rois:
+            raise ValueError(
+                f"{name} for {artifacts.plane_id} has {data.shape[0]} traces "
+                f"but the extraction file has {num_rois} ROI masks; traces "
+                f"and masks are paired by positional ROI index."
+            )
+        region = plane_segmentation.create_roi_table_region(
+            region=list(range(num_rois)), description="List of measured ROIs"
+        )
+        local_timing = dict(timing)
+        ts = local_timing.get("timestamps")
+        # A debug run caps the movie to its first N frames, so the traces are
+        # short while the sync file still describes the whole acquisition --
+        # that is the expected cause of a mismatch here. Every upstream cap is
+        # a head slice, so the head of the timestamp vector is the matching
+        # window. Any other cause means the movie and the sync record genuinely
+        # disagree, hence the warning rather than a silent trim.
+        if ts is not None and len(ts) != data.shape[1]:
+            logger.warning(
+                "%s for %s has %s samples but %s sync timestamps; trimming "
+                "timestamps to the trace length. Expected only for a "
+                "debug-truncated movie -- otherwise the movie and the sync "
+                "record disagree.",
+                name,
+                artifacts.plane_id,
+                data.shape[1],
+                len(ts),
+            )
+            local_timing["timestamps"] = ts[: data.shape[1]]
+        return RoiResponseSeries(name=name, data=data.T, rois=region, unit=unit, **local_timing)
+
+    roi = load_dataset(artifacts.extraction_h5, "roi", "traces")
+    module.add(
+        Fluorescence(
+            roi_response_series=series(f"roi_fluorescence{suffix}", roi, "a.u."),
+            name=f"raw{suffix}",
+        )
+    )
+    added["roi_fluorescence"] = True
+
+    neuropil = load_dataset(artifacts.extraction_h5, "neuropil", "traces")
+    module.add(series(f"neuropil_fluorescence{suffix}", neuropil, "a.u."))
+    added["neuropil_fluorescence"] = True
+
+    corrected = try_load_dataset(artifacts.extraction_h5, "corrected", "traces")
+    if corrected is not None:
+        module.add(series(f"neuropil_corrected{suffix}", corrected, "a.u."))
+
+    dff = try_load_dataset(artifacts.dff_h5, "data")
+    if dff is not None:
+        module.add(
+            DfOverF(
+                roi_response_series=series(f"dff{suffix}", dff, "%"),
+                name=f"dff{suffix}",
+            )
+        )
+        added["dff"] = True
+
+    events = try_load_dataset(artifacts.events_oasis_h5, "events")
+    if events is not None:
+        module.add(series(f"event{suffix}", events, "a.u."))
+        added["events"] = True
+    return added
+
+
+def add_plane(
+    nwbfile: NWBFile,
+    metadata: NwbMetadata,
+    plane: Dict[str, Any],
+    artifacts: PlaneArtifacts,
+    device: pynwb.device.Device,
+    optical_channel: OpticalChannel,
+    timestamps: Optional[np.ndarray] = None,
+) -> Tuple[Dict[str, bool], int]:
+    """Add one imaging plane's segmentation, images and traces to the NWB file.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The file being built.
+    metadata : NwbMetadata
+        The acquisition metadata.
+    plane : dict
+        This plane's imaging metadata record.
+    artifacts : PlaneArtifacts
+        Resolved upstream artifacts for this plane.
+    device : pynwb.device.Device
+        The microscope device.
+    optical_channel : OpticalChannel
+        The optical channel.
+    timestamps : numpy.ndarray, optional
+        Per-frame sync timestamps; when omitted the acquisition frame rate is
+        used instead (single-plane sessions have no sync file).
+
+    Returns
+    -------
+    dict of str to bool
+        Which NWB containers this plane contributed.
+    int
+        The number of ROIs written.
+    """
+    suffix = "_timeseries" if timestamps is not None else ""
+    resolution = float(plane["scale_factor"]) if plane["scale_factor"] else 1.0
+    logger.info("Packaging plane %s", plane["plane_id"])
+
+    imaging_plane = nwbfile.create_imaging_plane(
+        name=plane["plane_id"],
+        optical_channel=optical_channel,
+        imaging_rate=float(metadata.frame_rate),
+        description="Two-photon imaging plane",
+        device=device,
+        excitation_lambda=float(
+            metadata.excitation_wavelength
+            if metadata.excitation_wavelength is not None
+            else float("nan")
+        ),
+        indicator=metadata.indicator or "unknown",
+        location=plane_location(plane),
+        grid_spacing=[resolution, resolution],
+        grid_spacing_unit=plane["scale_factor_unit"],
+        origin_coords=[0.0, 0.0, float(plane["depth"] or 0.0)],
+        origin_coords_unit=plane["depth_unit"],
+    )
+    module = nwbfile.create_processing_module(
+        name=plane["plane_id"],
+        description=f"Processed ophys data for {plane['plane_id']}",
+    )
+
+    approach = segmentation_approach(artifacts.extraction_h5)
+    img_seg = ImageSegmentation(name="image_segmentation")
+    masks = load_roi_masks(artifacts.extraction_h5)
+    num_rois = int(masks.shape[0])
+    columns = _classification_columns(artifacts, num_rois)
+    # Extraction's own columns are unconditional: a classifier problem must not
+    # remove data that came from extraction.h5.
+    extraction_columns = _extraction_columns(artifacts, num_rois)
+    column_defs, colnames = _roi_table_columns(include_classification=columns is not None)
+    plane_segmentation = img_seg.create_plane_segmentation(
+        name="roi_table",
+        description=approach.value["method"] + approach.value["description"],
+        imaging_plane=imaging_plane,
+        columns=column_defs,
+        colnames=colnames,
+    )
+    _add_rois(plane_segmentation, masks, columns, extraction_columns)
+
+    neuropil_image = _add_neuropil_segmentation(
+        artifacts.extraction_h5, img_seg, imaging_plane, resolution
+    )
+    module.add(img_seg)
+
+    images = _summary_images(artifacts, approach, resolution, neuropil_image)
+    if images:
+        module.add(
+            Images(
+                name="images",
+                images=images,
+                description="Summary images of the two-photon movie",
+            )
+        )
+
+    contents = _add_traces(
+        module,
+        artifacts,
+        plane_segmentation,
+        num_rois,
+        suffix,
+        _series_kwargs(timestamps, metadata.frame_rate),
+    )
+    contents["classification"] = columns is not None
+    # Derived from the two PNG paths, NOT from bool(images): _summary_images
+    # appends the segmentation and neuropil mask images to that same list, so a
+    # non-empty list does not mean either projection was found.
+    contents["projections"] = (
+        artifacts.average_projection_png is not None
+        and artifacts.maximum_projection_png is not None
+    )
+    return contents, num_rois
+
+
+def sync_timestamps_per_plane(
+    planes: Sequence[Dict[str, Any]],
+    sync_timestamps: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    """Split multiplane sync edges into per-plane timestamp arrays.
+
+    The vsync edge train is decimated by the number of plane pairs and offset
+    by each plane's pair index (``coupled_plane_index``).
+
+    Parameters
+    ----------
+    planes : sequence of dict
+        Planes in acquisition order.
+    sync_timestamps : numpy.ndarray
+        Rising edges of the 2p vsync line, in seconds.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        Per-plane timestamps, keyed by plane id.
+
+    Raises
+    ------
+    ValueError
+        If the plane count is odd, or if a plane's coupled index does not match
+        its position.
+    """
+    count = len(planes)
+    if count % 2 != 0:
+        raise ValueError(
+            f"Multiplane session has {count} planes; coupled-pair "
+            f"timestamp assignment requires an even number."
+        )
+    groups = count // 2
+    result: Dict[str, np.ndarray] = {}
+    for position, plane in enumerate(planes):
+        group = position // 2
+        coupled = plane["coupled_plane_index"]
+        if coupled is not None and coupled != group:
+            raise ValueError(
+                f"Plane {plane['plane_id']} is at position {position} "
+                f"(temporal group {group}) but declares coupled index "
+                f"{coupled}; the acquisition metadata and "
+                f"the plane ordering disagree."
+            )
+        result[plane["plane_id"]] = sync_timestamps[group::groups]
+    return result
+
+
+def add_epoch_intervals(
+    nwbfile: NWBFile,
+    epoch_json: Path,
+    frame_rate: float,
+) -> NWBFile:
+    """Add single-plane epoch intervals from ``epoch_locations.json``.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The file being built.
+    epoch_json : Path
+        Path to ``epoch_locations.json``, mapping epoch name to
+        ``[start_frame, stop_frame]``.
+    frame_rate : float
+        Frame rate in Hz, used to convert frame indices to seconds.
+
+    Returns
+    -------
+    NWBFile
+        The updated file.
+    """
+    with open(epoch_json, "r") as f:
+        epochs = json.load(f)
+    table = TimeIntervals(
+        name="epochs",
+        description="Epochs for spontaneous and photostim periods",
+        columns=[
+            {"name": "stimulus_name", "description": "Epoch type name from key"},
+            {"name": "start_frame", "description": "start_frame"},
+            {"name": "stop_frame", "description": "stop_frame"},
+        ],
+    )
+    for name, (start_frame, stop_frame) in epochs.items():
+        if "neuron" in name and "slm" not in name:
+            name = "BCI"
+        elif "slm" in name and "post" not in name:
+            name = "photostim"
+        elif "slm" in name and "post" in name:
+            name = "photostim_post"
+        table.add_row(
+            start_time=start_frame / frame_rate,
+            stop_time=stop_frame / frame_rate,
+            start_frame=start_frame,
+            stop_frame=stop_frame,
+            stimulus_name=name,
+        )
+    nwbfile.add_time_intervals(table)
+    return nwbfile
+
+
+def add_plane_lab_metadata(
+    nwbfile: NWBFile,
+    planes: Sequence[Dict[str, Any]],
+    namespace_path: Path,
+) -> None:
+    """Attach the per-plane ndx-aibs-behavior-ophys lab metadata.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The file being built.
+    planes : sequence of dict
+        Planes in acquisition order.
+    namespace_path : Path
+        Path to the extension namespace YAML.
+    """
+    ophys_metadata = load_pynwb_extension(namespace_path)
+    for plane in planes:
+        nwbfile.add_lab_meta_data(
+            ophys_metadata(
+                name=plane["plane_id"],
+                imaging_depth=str(plane["depth"]) if plane["depth"] is not None else "",
+                imaging_plane_group=(
+                    str(plane["coupled_plane_index"])
+                    if plane["coupled_plane_index"] is not None
+                    else "-1"
+                ),
+                field_of_view_width=str(plane["width"]) if plane["width"] is not None else "",
+                field_of_view_height=str(plane["height"]) if plane["height"] is not None else "",
+            )
+        )
+
+
 def write_nwb_zarr(nwbfile: NWBFile, path: Path) -> Path:
     """Write the NWB file to a Zarr store.
 
@@ -673,830 +1060,6 @@ def read_nwb_zarr(path: Path) -> Tuple[str, ...]:
         return tuple(io.read().processing.keys())
 
 
-def nwb_ophys_single_plane(
-    nwbfile: pynwb.NWBFile,
-    file_paths: dict,
-    rig_json_data: dict,
-    session_json_data: dict,
-    procedures_json_data: dict,
-    frame_rate: float,
-) -> Tuple[pynwb.NWBFile, dict]:
-    """Create an NWB file for single-plane ophys data
-       using frame rate instead of timestamps
-
-    Parameters
-    ----------
-    nwbfile : pynwb.NWBFile
-        The NWB file
-    file_paths : dict
-        The paths to the processed files
-    rig_json_data : dict
-        The rig metadata
-    session_json_data : dict
-        The session metadata
-    procedures_json_data : dict
-        The subject metadata
-    frame_rate : float
-        The frame rate in Hz (frames per second)
-
-    Returns
-    -------
-    pynwb.NWBFile
-        The NWB file
-    dict
-        The overall metadata
-    """
-    device, optical_channel = get_microscope(
-        nwbfile, rig_json_data, session_json_data
-    )
-
-    # Get the single plane name from file_paths
-    plane_name = list(file_paths["planes"].keys())[0]
-    logging.info(f"Processing single plane: {plane_name}")
-
-    ophys_fov = get_ophys_fovs(session_json_data)[0]
-    structure = str(ophys_fov["targeted_structure"])
-    imaging_depth = str(ophys_fov["imaging_depth"])
-    step_unit = str(ophys_fov["fov_scale_factor_unit"])
-    imaging_depth_unit = str(ophys_fov["imaging_depth_unit"])
-
-    # Create imaging plane with appropriate metadata
-    location = (
-        "Structure: " + structure + " Depth: " + imaging_depth
-    )  # Update if available in metadata
-
-    ophys_module = nwbfile.create_processing_module(
-        name=plane_name, description="Single-plane ophys processing module"
-    )
-    injection = ""
-    for proc in procedures_json_data["subject_procedures"][0]["procedures"]:
-        if "injection_materials" in proc:
-            injection = proc["injection_materials"][0]["name"]
-
-    imaging_plane = nwbfile.create_imaging_plane(
-        name=plane_name,
-        optical_channel=optical_channel,
-        imaging_rate=frame_rate,
-        description="2-photon imaging plane",
-        device=device,
-        excitation_lambda=get_excitation_wavelength(session_json_data),
-        indicator=injection,
-        location=location,
-        unit="",
-        grid_spacing=[1.0, 1.0],  # Update if available
-        grid_spacing_unit=step_unit,
-        origin_coords=[0.0, 0.0, 0.0],
-        origin_coords_unit=imaging_depth_unit,
-    )
-
-    # Add ImageSegmentation
-    img_seg = ImageSegmentation(name="image_segmentation")
-
-    # Determine segmentation approach
-    try:
-        segmentation_approach = get_segementation_approach(
-            file_paths["planes"][plane_name]["extraction_h5"]
-        )
-        plane_seg_approach = segmentation_approach.value["method"]
-        plane_seg_descr = segmentation_approach.value["description"]
-    except Exception as e:
-        logging.warning(f"Could not determine segmentation approach: {e}")
-        plane_seg_approach = "unknown"
-        plane_seg_descr = "Unknown segmentation method"
-
-    # Create plane segmentation
-    try:
-        # Try to load classifier data
-        soma_predictions = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="soma",
-            h5_key="predictions",
-        )
-        soma_probabilities = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="soma",
-            h5_key="probabilities",
-        )
-        dendrite_predictions = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="dendrites",
-            h5_key="predictions",
-        )
-        dendrite_probabilities = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="dendrites",
-            h5_key="probabilities",
-        )
-
-        # Per-ROI cellpose probability from the extraction file. Only
-        # present when segmentation ran cellpose; when absent (e.g.
-        # activity-based segmentation) the column is still created but
-        # filled with NaN, so the roi_table schema stays consistent.
-        try:
-            cellpose_soma_probability = load_generic_group(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                h5_group="rois",
-                h5_key="cellpose_soma_probability",
-            )
-        except Exception:
-            cellpose_soma_probability = None
-
-        # Per-ROI suite2p morphology stats (always present in the
-        # extraction file's rois/ group).
-        suite2p_stats = {
-            stat: load_generic_group(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                h5_group="rois",
-                h5_key=stat,
-            )
-            for stat in SUITE2P_ROI_STATS
-        }
-
-        columns = [
-            VectorData(
-                name="is_soma",
-                description="Soma predictions",
-            ),
-            VectorData(
-                name="soma_probability",
-                description="Soma probabilities",
-            ),
-            VectorData(
-                name="is_dendrite",
-                description="Dendrite predictions",
-            ),
-            VectorData(
-                name="dendrite_probability",
-                description="Dendrite probabilities",
-            ),
-            VectorData(
-                name="cellpose_soma_probability",
-                description=(
-                    "Mean cellpose cell-probability under each ROI "
-                    "footprint (probability in [0, 1]); NaN when "
-                    "cellpose segmentation was not run"
-                ),
-            ),
-        ]
-        colnames = [
-            "is_soma",
-            "soma_probability",
-            "is_dendrite",
-            "dendrite_probability",
-            "cellpose_soma_probability",
-        ]
-        for stat in SUITE2P_ROI_STATS:
-            columns.append(
-                VectorData(
-                    name=stat,
-                    description=f"suite2p ROI stat: {stat}",
-                )
-            )
-            colnames.append(stat)
-
-        plane_segmentation = img_seg.create_plane_segmentation(
-            name="roi_table",
-            description=plane_seg_approach + plane_seg_descr,
-            imaging_plane=imaging_plane,
-            columns=columns,
-            colnames=colnames,
-        )
-
-        for idx, pixel_mask in enumerate(
-            load_sparse_array(
-                file_paths["planes"][plane_name]["extraction_h5"]
-            )
-        ):
-            if cellpose_soma_probability is not None:
-                cellpose_value = cellpose_soma_probability[idx]
-            else:
-                cellpose_value = np.nan
-            plane_segmentation.add_roi(
-                image_mask=pixel_mask,
-                is_soma=soma_predictions[idx],
-                soma_probability=soma_probabilities[idx][-1],
-                is_dendrite=dendrite_predictions[idx],
-                dendrite_probability=dendrite_probabilities[idx][-1],
-                cellpose_soma_probability=cellpose_value,
-                **{
-                    stat: suite2p_stats[stat][idx]
-                    for stat in SUITE2P_ROI_STATS
-                },
-            )
-    except Exception as e:
-        logging.warning(f"Error adding ROIs with classifier data: {e}")
-        # Fallback to simpler plane segmentation without classifier data
-        plane_segmentation = img_seg.create_plane_segmentation(
-            name="roi_table",
-            description=plane_seg_approach + plane_seg_descr,
-            imaging_plane=imaging_plane,
-        )
-        for idx, pixel_mask in enumerate(
-            load_sparse_array(
-                file_paths["planes"][plane_name]["extraction_h5"]
-            )
-        ):
-            plane_segmentation.add_roi(image_mask=pixel_mask)
-
-    neuropil_img = None
-    if segmentation_approach in (
-        SegmentationApproach.SUITE2P_ANATOMICAL,
-        SegmentationApproach.SUITE2P_ACTIVITY,
-    ):
-        neuropil_img = add_neuropil_segmentation_and_r_values(
-            file_paths["planes"][plane_name]["extraction_h5"],
-            img_seg,
-            imaging_plane,
-        )
-    else:
-        logging.info(
-            "Skipping neuropil segmentation. Currently only supported "
-            "for suite2p-based segmentation approaches. "
-            f"Segmentation approach used: {segmentation_approach}"
-        )
-
-    ophys_module.add(img_seg)
-
-    # Add projections and images
-    try:
-        # Add average and max projections if available
-        avg_projection = plt.imread(
-            file_paths["planes"][plane_name]["average_projection_png"]
-        )
-        avg_img = GrayscaleImage(
-            name="average_projection",
-            data=avg_projection,
-            resolution=1.0,  # Update if available
-            description="Average intensity projection of entire session",
-        )
-
-        max_projection = plt.imread(
-            file_paths["planes"][plane_name]["max_projection_png"]
-        )
-        max_img = GrayscaleImage(
-            name="max_projection",
-            data=max_projection,
-            resolution=1.0,  # Update if available
-            description="Max intensity projection of entire session",
-        )
-
-        # Try to add segmentation mask if available
-        summary_images = [avg_img, max_img]
-        if segmentation_approach == SegmentationApproach.SUITE2P_ANATOMICAL:
-            segmentation_mask = load_generic_group(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                h5_group="cellpose",
-                h5_key="masks",
-            )
-            mask_img = GrayscaleImage(
-                name="segmentation_mask_image",
-                data=segmentation_mask,
-                resolution=1.0,  # Update if available
-                description="Segmentation projection of entire session",
-            )
-            summary_images.append(mask_img)
-
-        if neuropil_img is not None:
-            summary_images.append(neuropil_img)
-
-        images = Images(
-            name="images",
-            images=summary_images,
-            description="Summary images of the ophys movie",
-        )
-
-        ophys_module.add(images)
-    except Exception as e:
-        logging.warning(f"Error adding projection images: {e}")
-    """
-    if file_paths['planes'][plane_name]["classifier_h5"] is None:
-        return nwbfile
-    """
-    # Add timeseries data
-    try:
-        # ROI traces
-        roi_traces, roi_names = load_signals(
-            file_paths["planes"][plane_name]["extraction_h5"],
-            plane_segmentation,
-            h5_group="traces",
-            h5_key="roi",
-        )
-
-        # Create time series using frame rate
-        roi_traces_series = RoiResponseSeries(
-            name="roi_fluorescence",
-            data=roi_traces.T,
-            rois=roi_names,
-            unit="a.u.",
-            rate=frame_rate,
-            starting_time=0.0,
-        )
-
-        # Neuropil traces
-        neuropil_traces, roi_names = load_signals(
-            file_paths["planes"][plane_name]["extraction_h5"],
-            plane_segmentation,
-            h5_group="traces",
-            h5_key="neuropil",
-        )
-
-        neuropil_traces_series = RoiResponseSeries(
-            name="neuropil_fluorescence",
-            data=neuropil_traces.T,
-            rois=roi_names,
-            unit="a.u.",
-            rate=frame_rate,
-            starting_time=0.0,
-        )
-
-        # Neuropil corrected traces if available
-        try:
-            neuropil_corrected, roi_names = load_signals(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                plane_segmentation,
-                h5_group="traces",
-                h5_key="corrected",
-            )
-
-            neuropil_corrected_series = RoiResponseSeries(
-                name="neuropil_corrected",
-                data=neuropil_corrected.T,
-                rois=roi_names,
-                unit="a.u.",
-                rate=frame_rate,
-                starting_time=0.0,
-            )
-
-            ophys_module.add(neuropil_corrected_series)
-        except Exception as e:
-            logging.warning(f"Error adding neuropil corrected traces: {e}")
-
-        # DfOverF traces if available
-        try:
-            dfof_traces, roi_names = load_signals(
-                file_paths["planes"][plane_name]["dff_h5"],
-                plane_segmentation,
-                h5_key="data",
-            )
-
-            dfof_traces_series = RoiResponseSeries(
-                name="dff",
-                data=dfof_traces.T,
-                rois=roi_names,
-                unit="%",
-                rate=frame_rate,
-                starting_time=0.0,
-            )
-
-            ophys_module.add(
-                DfOverF(roi_response_series=dfof_traces_series, name="dff")
-            )
-        except Exception as e:
-            logging.warning(f"Error adding DfOverF traces: {e}")
-
-        # Event traces if available
-        try:
-            event_traces, roi_names = load_signals(
-                file_paths["planes"][plane_name]["events_oasis_h5"],
-                plane_segmentation,
-                h5_key="events",
-            )
-
-            event_traces_series = RoiResponseSeries(
-                name="event",
-                data=event_traces.T,
-                rois=roi_names,
-                unit="a.u.",
-                rate=frame_rate,
-                starting_time=0.0,
-            )
-
-            ophys_module.add(event_traces_series)
-        except Exception as e:
-            logging.warning(f"Error adding event traces: {e}")
-
-        # Add the base fluorescence data to the module
-        ophys_module.add(
-            Fluorescence(roi_response_series=roi_traces_series, name="raw")
-        )
-        ophys_module.add(neuropil_traces_series)
-
-    except Exception as e:
-        logging.error(f"Error adding timeseries data: {e}")
-        raise
-
-    return nwbfile
-
-
-def nwb_ophys(
-    nwbfile: pynwb.NWBFile,
-    file_paths: dict,
-    ophys_fovs: list,
-    rig_json_data: dict,
-    session_json_data: dict,
-    subject_json_data: dict,
-) -> Tuple[pynwb.NWBFile, dict]:
-    """Create an NWB file for ophys data
-
-    Parameters
-    ----------
-    nwbfile : pynwb.NWBFile
-        The NWB file
-    file_paths : dict
-        The paths to the processed files
-    ophys_fovs : list
-        The session metadata
-    rig_json_data : dict
-        The rig metadata
-    session_json_data : dict
-        The session metadata
-    subject_json_data : dict
-        The subject metadata
-    processing_json_data : dict
-        The processing metadata
-
-    Returns
-    -------
-    pynwb.NWBFile
-        The NWB file
-    dict
-        The overall metadata
-    """
-    device, optical_channel = get_microscope(
-        nwbfile, rig_json_data, session_json_data
-    )
-    # Start plane specific processing
-    for plane in ophys_fovs:
-        plane_name = f"{plane['targeted_structure']}_{plane['index']}"
-        logging.info(f"Processing plane: {plane_name}")
-        location = (
-            "Structure: "
-            + plane["targeted_structure"]
-            + " Depth: "
-            + str(plane["imaging_depth"])
-        )
-        ophys_module = nwbfile.create_processing_module(
-            name=plane_name, description=""
-        )
-        imaging_plane = nwbfile.create_imaging_plane(
-            name=plane_name,  # ophys_plane_id
-            optical_channel=optical_channel,
-            imaging_rate=float(plane["frame_rate"]),
-            description="Two-photon imaging plane",
-            device=device,
-            excitation_lambda=float(
-                session_json_data["data_streams"][0]["light_sources"][0][
-                    "wavelength"
-                ]
-            ),
-            indicator=subject_json_data["genotype"],
-            location=location,
-            grid_spacing=[
-                float(plane["fov_scale_factor"]),
-                float(plane["fov_scale_factor"]),
-            ],
-            grid_spacing_unit=plane["fov_coordinate_unit"],
-            origin_coords=[0.0, 0.0, 0.0],  # TODO: dunno
-            origin_coords_unit=plane["fov_coordinate_unit"],
-        )
-        segmentation_approach = get_segementation_approach(
-            file_paths["planes"][plane_name]["extraction_h5"]
-        )
-        plane_seg_approach = segmentation_approach.value["method"]
-        plane_seg_descr = segmentation_approach.value["description"]
-        img_seg = ImageSegmentation(name="image_segmentation")
-        soma_predictions = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="soma",
-            h5_key="predictions",
-        )
-        soma_probabilities = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="soma",
-            h5_key="probabilities",
-        )
-        dendrite_predictions = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="dendrites",
-            h5_key="predictions",
-        )
-        dendrite_probabilities = load_generic_group(
-            file_paths["planes"][plane_name]["classifier_h5"],
-            h5_group="dendrites",
-            h5_key="probabilities",
-        )
-
-        # Per-ROI cellpose probability from the extraction file. Only
-        # present when segmentation ran cellpose; when absent (e.g.
-        # activity-based segmentation) the column is still created but
-        # filled with NaN, so the roi_table schema stays consistent.
-        try:
-            cellpose_soma_probability = load_generic_group(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                h5_group="rois",
-                h5_key="cellpose_soma_probability",
-            )
-        except Exception:
-            cellpose_soma_probability = None
-
-        # Per-ROI suite2p morphology stats (always present in the
-        # extraction file's rois/ group).
-        suite2p_stats = {
-            stat: load_generic_group(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                h5_group="rois",
-                h5_key=stat,
-            )
-            for stat in SUITE2P_ROI_STATS
-        }
-
-        columns = [
-            VectorData(
-                name="is_soma",
-                description="Soma predictions",
-            ),
-            VectorData(
-                name="soma_probability",
-                description="Soma probabilities",
-            ),
-            VectorData(
-                name="is_dendrite",
-                description="Dendrite predictions",
-            ),
-            VectorData(
-                name="dendrite_probability",
-                description="Dendrite probabilities",
-            ),
-            VectorData(
-                name="cellpose_soma_probability",
-                description=(
-                    "Mean cellpose cell-probability under each ROI "
-                    "footprint (probability in [0, 1]); NaN when "
-                    "cellpose segmentation was not run"
-                ),
-            ),
-        ]
-        colnames = [
-            "is_soma",
-            "soma_probability",
-            "is_dendrite",
-            "dendrite_probability",
-            "cellpose_soma_probability",
-        ]
-        for stat in SUITE2P_ROI_STATS:
-            columns.append(
-                VectorData(
-                    name=stat,
-                    description=f"suite2p ROI stat: {stat}",
-                )
-            )
-            colnames.append(stat)
-
-        plane_segmentation = img_seg.create_plane_segmentation(
-            name="roi_table",
-            description=plane_seg_approach + plane_seg_descr,
-            imaging_plane=imaging_plane,
-            columns=columns,
-            colnames=colnames,
-        )
-
-        neuropil_img = None
-        if segmentation_approach in (
-            SegmentationApproach.SUITE2P_ANATOMICAL,
-            SegmentationApproach.SUITE2P_ACTIVITY,
-        ):
-            neuropil_img = add_neuropil_segmentation_and_r_values(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                img_seg,
-                imaging_plane,
-                resolution=float(plane["fov_scale_factor"]),
-            )
-        else:
-            logging.info(
-                "Skipping neuropil segmentation. Currently only supported "
-                "for suite2p-based segmentation approaches. "
-                f"Segmentation approach used: {segmentation_approach}"
-            )
-
-        ophys_module.add(img_seg)
-
-        avg_projection = plt.imread(
-            file_paths["planes"][plane_name]["average_projection_png"]
-        )
-        avg_img = GrayscaleImage(
-            name="average_projection",
-            data=avg_projection,
-            resolution=float(plane["fov_scale_factor"]),
-            description="Average intensity projection of entire session",
-        )
-        max_projection = plt.imread(
-            file_paths["planes"][plane_name]["max_projection_png"]
-        )
-        max_img = GrayscaleImage(
-            name="max_projection",
-            data=max_projection,
-            resolution=float(plane["fov_scale_factor"]),  # pixels/cm
-            description="Max intensity projection of entire session",
-        )
-        if segmentation_approach == SegmentationApproach.SUITE2P_ANATOMICAL:
-            segmentation_mask = load_generic_group(
-                file_paths["planes"][plane_name]["extraction_h5"],
-                h5_group="cellpose",
-                h5_key="masks",
-            )
-        else:
-            segmentation_mask = convert_rois_to_segmentation_mask(
-                file_paths["planes"][plane_name]["extraction_h5"]
-            )
-        mask_img = GrayscaleImage(
-            name="segmentation_mask_image",
-            data=segmentation_mask,
-            resolution=float(plane["fov_scale_factor"]),  # pixels/cm
-            description="Segmentation projection of entire session",
-        )
-
-        summary_images = [avg_img, max_img, mask_img]
-        if neuropil_img is not None:
-            summary_images.append(neuropil_img)
-
-        images = Images(
-            name="images",
-            images=summary_images,
-            description="Summary images of the two-photon movie",
-        )
-        ophys_module.add(images)
-
-        # 4D. ROIS
-
-        rois_shape = load_generic_group(
-            file_paths["planes"][plane_name]["extraction_h5"],
-            h5_group="rois",
-            h5_key="shape",
-        )
-        for idx, pixel_mask in enumerate(
-            load_sparse_array(
-                file_paths["planes"][plane_name]["extraction_h5"]
-            )
-        ):
-            if cellpose_soma_probability is not None:
-                cellpose_value = cellpose_soma_probability[idx]
-            else:
-                cellpose_value = np.nan
-            plane_segmentation.add_roi(
-                image_mask=pixel_mask,
-                is_soma=soma_predictions[idx],
-                # last element is the probability
-                soma_probability=soma_probabilities[idx][-1],
-                is_dendrite=dendrite_predictions[idx],
-                dendrite_probability=dendrite_probabilities[idx][-1],
-                cellpose_soma_probability=cellpose_value,
-                **{
-                    stat: suite2p_stats[stat][idx]
-                    for stat in SUITE2P_ROI_STATS
-                },
-            )
-
-        roi_traces, roi_names = load_signals(
-            file_paths["planes"][plane_name]["extraction_h5"],
-            plane_segmentation,
-            h5_group="traces",
-            h5_key="roi",
-        )
-        roi_traces_series = RoiResponseSeries(
-            name="roi_fluorescence_timeseries",
-            data=roi_traces.T,
-            rois=roi_names,
-            unit="a.u.",
-            timestamps=plane["timestamps"],
-        )
-
-        assert roi_traces.shape[0] == int(
-            rois_shape[0]
-        ), "Mismatch in number of ROIs and traces"
-
-        neuropil_traces, roi_names = load_signals(
-            file_paths["planes"][plane_name]["extraction_h5"],
-            plane_segmentation,
-            h5_group="traces",
-            h5_key="neuropil",
-        )
-        neuropil_traces_series = RoiResponseSeries(
-            name="neuropil_fluorescence_timeseries",
-            data=neuropil_traces.T,
-            rois=roi_names,
-            unit="a.u.",
-            timestamps=plane["timestamps"],
-        )
-
-        assert neuropil_traces.shape[0] == int(
-            rois_shape[0]
-        ), "Mismatch in number of ROIs and traces"
-
-        neuropil_corrected, roi_names = load_signals(
-            file_paths["planes"][plane_name]["extraction_h5"],
-            plane_segmentation,
-            h5_group="traces",
-            h5_key="corrected",
-        )
-        neuropil_corrected_series = RoiResponseSeries(
-            name="neuropil_corrected_timeseries",
-            data=neuropil_corrected.T,
-            rois=roi_names,
-            unit="a.u.",
-            timestamps=plane["timestamps"],
-        )
-
-        assert neuropil_corrected.shape[0] == int(
-            rois_shape[0]
-        ), "Mismatch in number of ROIs and traces"
-
-        dfof_traces, roi_names = load_signals(
-            file_paths["planes"][plane_name]["dff_h5"],
-            plane_segmentation,
-            h5_key="data",
-        )
-
-        dfof_traces_series = RoiResponseSeries(
-            name="dff_timeseries",
-            data=dfof_traces.T,
-            rois=roi_names,
-            unit="%",
-            timestamps=plane["timestamps"],
-        )
-
-        assert dfof_traces.shape[0] == int(
-            rois_shape[0]
-        ), "Mismatch in number of ROIs and traces"
-
-        event_traces, roi_names = load_signals(
-            file_paths["planes"][plane_name]["events_oasis_h5"],
-            plane_segmentation,
-            h5_key="events",
-        )
-
-        event_traces_series = RoiResponseSeries(
-            name="event_timeseries",
-            data=event_traces.T,
-            rois=roi_names,
-            unit="a.u.",
-            timestamps=plane["timestamps"],
-        )
-
-        assert event_traces.shape[0] == int(
-            rois_shape[0]
-        ), "Mismatch in number of ROIs and traces"
-
-        ophys_module.add(
-            DfOverF(
-                roi_response_series=dfof_traces_series, name="dff_timeseries"
-            )
-        )
-
-        ophys_module.add(
-            Fluorescence(
-                roi_response_series=roi_traces_series, name="raw_timeseries"
-            )
-        )
-        ophys_module.add(neuropil_traces_series)
-        ophys_module.add(neuropil_corrected_series)
-        ophys_module.add(event_traces_series)
-    return nwbfile
-
-
-def sync_times_to_multiplane_fovs(
-    ophys_fovs: list, sync_timestamps: np.array
-) -> list:
-    """Convert the timestamps to FOVs for multiplane only
-
-    Parameters
-    ----------
-    ophys_fovs : list
-        The FOVs
-    sync_timestamps : np.array
-        The sync timestamps
-
-    Returns
-    -------
-    list
-        The FOVs with timestamps
-    """
-    planes = len(ophys_fovs)
-    if planes % 2 != 0:
-        raise Exception("Odd number of planes, please check code")
-    # Planes are paired, so we only want to get half of them
-    image_groups = int(planes / 2)
-    for plane_group in range(image_groups):
-        for indiv_plane_in_group in range(2):
-            index_plane = plane_group * 2 + indiv_plane_in_group
-            # We double check, this is important
-            if plane_group != ophys_fovs[index_plane]["coupled_fov_index"]:
-                raise Exception("Mismatched temporal group, please check code")
-            ophys_fovs[index_plane]["timestamps"] = sync_timestamps[
-                plane_group::image_groups
-            ]
-    return ophys_fovs
-
-
 def _sync_timestamps(sync_fp: Path) -> np.array:
     """Get the sync timestamps from the sync file
     Parameters
@@ -1521,67 +1084,6 @@ def _sync_timestamps(sync_fp: Path) -> np.array:
             line="vsync_2p",
             units="seconds"
         )
-
-
-def add_intervals_sp_nwb(json_path, frame_rate, nwbfile):
-    """
-    Add epoch intervals to the NWB file based on epochs.json.
-
-    Parameters
-    ----------
-    json_path : Path or str
-        Path to epochs.json file. Format:
-            {epoch_name: [start_frame, stop_frame]}
-    frame_rate : float
-        Frame rate in Hz used to convert frame indices to seconds.
-    nwbfile : NWBFile
-        The NWB file to which the epochs will be added.
-
-    Returns
-    -------
-    NWBFile
-        The updated NWB file with epochs added to the TimeIntervals table.
-    """
-    with open(json_path, "r") as f:
-        epoch_data = json.load(f)
-
-    # Create a TimeIntervals table
-    trial_table = TimeIntervals(
-        name="epochs",
-        description="Epochs for spontaneous and photostim periods",
-        columns=[
-            {
-                "name": "stimulus_name",
-                "description": "Epoch type name from key",
-            },
-            {"name": "start_frame", "description": "start_frame"},
-            {"name": "stop_frame", "description": "stop_frame"},
-        ],
-    )
-
-    # Add intervals
-    for epoch_name, (start_frame, stop_frame) in epoch_data.items():
-        if "neuron" in epoch_name and "slm" not in epoch_name:
-            epoch_name = "BCI"
-        elif "slm" in epoch_name and "post" not in epoch_name:
-            epoch_name = "photostim"
-        elif "slm" in epoch_name and "post" in epoch_name:
-            epoch_name = "photostim_post"
-        start_time = start_frame / frame_rate
-        stop_time = stop_frame / frame_rate
-
-        trial_table.add_row(
-            start_time=start_time,
-            stop_time=stop_time,
-            start_frame=start_frame,
-            stop_frame=stop_frame,
-            stimulus_name=epoch_name,
-        )
-
-    # Add the table to the NWB file
-    nwbfile.add_time_intervals(trial_table)
-
-    return nwbfile
 
 
 if __name__ == "__main__":
