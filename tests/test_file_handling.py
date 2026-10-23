@@ -241,6 +241,107 @@ class TestSideInputs(unittest.TestCase):
             self.assertIn("behavior/*.h5", logs.output[0])
             self.assertIn(str(tmp), logs.output[0])
 
+    def test_find_sync_file_directory_component_names_the_immediate_parent(self) -> None:
+        """A pattern's directory component must match the file's own parent."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _touch(root / "behavior" / "nested" / "sess_sync.h5")
+            _touch(root / "pophys_extra" / "data_main.h5")
+            _touch(root / "other" / "data_main.h5")
+            with self.assertLogs(file_handling.logger, level=logging.ERROR):
+                self.assertIsNone(file_handling.find_sync_file(root))
+
+
+class TestSymlinkedDirectories(unittest.TestCase):
+    """Discovery through a mount whose entries are symlinks to directories elsewhere.
+
+    Workflow engines stage task inputs this way, and ``Path.rglob`` does not
+    descend into a symlinked directory.
+    """
+
+    def setUp(self) -> None:
+        """Link ``mount/staged`` to a real directory outside the mount."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.real = Path(tmp.name) / "work" / "staged"
+        self.real.mkdir(parents=True)
+        self.root = Path(tmp.name) / "mount"
+        self.root.mkdir()
+        (self.root / "staged").symlink_to(self.real, target_is_directory=True)
+
+    def _assert_sync_file_behind_link(self, relative: str) -> None:
+        """Assert ``find_sync_file`` resolves ``relative`` staged behind the link."""
+        _touch(self.real / relative)
+        self.assertEqual(
+            file_handling.find_sync_file(self.root),
+            self.root / "staged" / relative,
+        )
+
+    def test_find_artifact_follows_the_link(self) -> None:
+        """An artifact behind the link is found at its path under the mount."""
+        _touch(self.real / "VISp_0" / "dff" / "VISp_0_dff.h5")
+        self.assertEqual(
+            file_handling.find_artifact(self.root, "dff.h5", "VISp_0"),
+            self.root / "staged" / "VISp_0" / "dff" / "VISp_0_dff.h5",
+        )
+
+    def test_find_artifacts_follows_every_link_in_sorted_order(self) -> None:
+        """One link per staged input; matches from all of them come back sorted."""
+        other = self.real.parent / "other"
+        _touch(other / "VISl_1_dff.h5")
+        (self.root / "other").symlink_to(other, target_is_directory=True)
+        _touch(self.real / "VISp_0_dff.h5")
+        self.assertEqual(
+            file_handling.find_artifacts(self.root, "dff.h5"),
+            [
+                self.root / "other" / "VISl_1_dff.h5",
+                self.root / "staged" / "VISp_0_dff.h5",
+            ],
+        )
+
+    def test_a_link_back_to_the_mount_does_not_recurse_forever(self) -> None:
+        """A symlink cycle yields each file once instead of looping."""
+        _touch(self.real / "VISp_0_dff.h5")
+        (self.real / "loop").symlink_to(self.root, target_is_directory=True)
+        self.assertEqual(
+            file_handling.find_artifacts(self.root, "dff.h5"),
+            [self.root / "staged" / "VISp_0_dff.h5"],
+        )
+
+    def test_collect_session_artifacts_follows_the_link(self) -> None:
+        """Every plane resolves from a layout that sits wholly behind the link."""
+        for plane in PLANES:
+            _write_v2_plane(self.real, plane)
+        artifacts = file_handling.collect_session_artifacts(self.root, PLANES)
+        self.assertEqual([plane.plane_id for plane in artifacts], list(PLANES))
+        for plane in artifacts:
+            name = f"{plane.plane_id}_extraction.h5"
+            self.assertEqual(
+                plane.extraction_h5,
+                self.root / "staged" / plane.plane_id / "extraction" / name,
+            )
+            self.assertTrue(all(value is not None for value in vars(plane).values()))
+
+    def test_find_epoch_locations_follows_the_link(self) -> None:
+        """The epoch file behind the link is found."""
+        _touch(self.real / "plane_0" / "motion_correction" / "epoch_locations.json")
+        self.assertEqual(
+            file_handling.find_epoch_locations(self.root),
+            self.root / "staged" / "plane_0" / "motion_correction" / "epoch_locations.json",
+        )
+
+    def test_find_sync_file_data_main_follows_the_link(self) -> None:
+        """The single-plane pophys/data_main.h5 is found behind the link."""
+        self._assert_sync_file_behind_link("pophys/data_main.h5")
+
+    def test_find_sync_file_behavior_folder_follows_the_link(self) -> None:
+        """A behavior/*.h5 is found behind the link."""
+        self._assert_sync_file_behind_link("behavior/sess_sync.h5")
+
+    def test_find_sync_file_ophys_folder_follows_the_link(self) -> None:
+        """A *ophys/*.h5 is found behind the link."""
+        self._assert_sync_file_behind_link("mpophys/sess_sync.h5")
+
 
 class TestArtifactContract(unittest.TestCase):
     """The artifact table itself is part of the cross-step contract."""
