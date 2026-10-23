@@ -128,8 +128,9 @@ the HDF5 reads (`load_dataset()`, `try_load_dataset()`, `load_roi_masks()`,
 
 Discovery of the upstream step outputs this library repackages.
 `collect_session_artifacts()` resolves one frozen `PlaneArtifacts` per plane
-from `find_artifact()` / `find_artifacts()`, which glob recursively on the
-`<plane_id>_` filename prefix rather than walking a fixed directory layout. Only
+from `find_artifact()` / `find_artifacts()`, which glob recursively, following
+symlinked directories, on the `<plane_id>_` filename prefix rather than walking
+a fixed directory layout. Only
 `extraction_h5` is required; every other artifact degrades to an omitted NWB
 container. Also `find_epoch_locations()` and `find_sync_file()`. Kept
 import-light — pure path logic, so the upstream contract stays testable without
