@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from aind_pophys_metadata import find_one
+from aind_pophys_metadata import find_one, search
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,8 @@ def find_artifact(
     Parameters
     ----------
     search_root : Path
-        Directory searched recursively (the ``processed`` mount).
+        Directory searched recursively, following symlinked directories (the
+        ``processed`` mount).
     part : str
         Artifact filename suffix, e.g. ``"extraction.h5"``.
     plane_id : str, optional
@@ -98,7 +99,7 @@ def find_artifacts(
     Parameters
     ----------
     search_root : Path
-        Directory searched recursively.
+        Directory searched recursively, following symlinked directories.
     part : str
         Artifact filename suffix, e.g. ``"extraction.h5"``.
     plane_id : str, optional
@@ -111,7 +112,7 @@ def find_artifacts(
         All matches, sorted for determinism; empty when there are none.
     """
     prefix = f"{plane_id}_" if plane_id else ""
-    return sorted(Path(search_root).rglob(f"{prefix}*{part}"))
+    return search(Path(search_root), f"{prefix}*{part}")
 
 
 def collect_plane_artifacts(
@@ -240,7 +241,8 @@ def find_epoch_locations(search_root: Path) -> Optional[Path]:
     Parameters
     ----------
     search_root : Path
-        The ``processed`` mount, searched recursively.
+        The ``processed`` mount, searched recursively, following symlinked
+        directories.
 
     Returns
     -------
@@ -259,7 +261,8 @@ def find_sync_file(raw_root: Path) -> Optional[Path]:
     Parameters
     ----------
     raw_root : Path
-        The ``raw`` mount, searched recursively.
+        The ``raw`` mount, searched recursively, following symlinked
+        directories.
 
     Returns
     -------
