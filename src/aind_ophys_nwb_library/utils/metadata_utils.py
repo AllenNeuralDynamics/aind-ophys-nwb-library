@@ -283,9 +283,9 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
             f"{core.version}); NWB packaging has nothing to write."
         )
 
-    # Validated here rather than ~150 lines later in job.py: every NWB imaging
-    # plane needs an imaging_rate, so an asset without one cannot be packaged
-    # at all and should fail at load, naming the file and schema version.
+    # Every NWB imaging plane needs an imaging_rate, so an asset without one
+    # cannot be packaged at all and fails here, naming the file and schema
+    # version.
     frame_rate = core.get_frame_rate(required=True)
 
     genotype = (core.subject_raw or {}).get("genotype")

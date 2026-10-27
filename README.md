@@ -160,9 +160,8 @@ input file, so messy-but-sufficient metadata still packages.
 ## Outputs
 
 Everything is written under `<output_dir>/nwb/`, never at the results root:
-`main.nf` publishes with `saveAs { new File(filename).getName() }`, which
-flattens every published path to its basename, so a root-level `processing.json`
-would collide with the aggregator tier's.
+`main.nf` publishes each step's files at their relative paths, so a root-level
+`processing.json` would collide with the run-level one the aggregator writes.
 
 - `pophys.nwb.zarr` (the `nwb_name` setting) — the packaged NWB Zarr store
 - `processing.json` — full v2 `Processing`, written by the shared `stage_guard`
