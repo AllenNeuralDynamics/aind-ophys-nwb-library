@@ -28,7 +28,7 @@ from pynwb.ophys import (
 )
 
 from .file_handling import PlaneArtifacts
-from .utils.metadata_utils import NwbMetadata, plane_location
+from .utils.metadata_utils import PLANE_GROUP_KEY, NwbMetadata, plane_location
 
 logger = logging.getLogger(__name__)
 
@@ -810,7 +810,13 @@ def add_plane(
         The number of ROIs written.
     """
     suffix = "_timeseries" if timestamps is not None else ""
-    resolution = float(plane["scale_factor"]) if plane["scale_factor"] else 1.0
+    resolution = float(plane["um_per_pixel"]) if plane["um_per_pixel"] is not None else None
+    if resolution is None:
+        logger.warning(
+            "No pixel size for %s in the acquisition metadata; grid_spacing and image "
+            "resolution are omitted.",
+            plane["plane_id"],
+        )
     logger.info("Packaging plane %s", plane["plane_id"])
 
     imaging_plane = nwbfile.create_imaging_plane(
@@ -826,8 +832,8 @@ def add_plane(
         ),
         indicator=metadata.indicator or "unknown",
         location=plane_location(plane),
-        grid_spacing=[resolution, resolution],
-        grid_spacing_unit=plane["scale_factor_unit"],
+        grid_spacing=None if resolution is None else [resolution, resolution],
+        grid_spacing_unit="micrometer",
         origin_coords=[0.0, 0.0, float(plane["depth"] or 0.0)],
         origin_coords_unit=plane["depth_unit"],
     )
@@ -844,7 +850,13 @@ def add_plane(
     # Extraction's own columns are unconditional: a classifier problem must not
     # remove data that came from extraction.h5.
     extraction_columns = _extraction_columns(artifacts, num_rois)
-    column_defs, colnames = _roi_table_columns(include_classification=columns is not None)
+    empty_dtypes = None
+    if num_rois == 0:
+        sources = {**extraction_columns, **(columns or {})}
+        empty_dtypes = {name: np.asarray(values).dtype for name, values in sources.items()}
+    column_defs, colnames = _roi_table_columns(
+        include_classification=columns is not None, empty_dtypes=empty_dtypes
+    )
     plane_segmentation = img_seg.create_plane_segmentation(
         name="roi_table",
         description=f"{approach.value['method']}: {approach.value['description']}",
@@ -895,7 +907,7 @@ def sync_timestamps_per_plane(
     """Split multiplane sync edges into per-plane timestamp arrays.
 
     The vsync edge train is decimated by the number of plane pairs and offset
-    by each plane's pair index (``coupled_plane_index``).
+    by each plane's pair index (``plane_group``).
 
     Parameters
     ----------
@@ -912,7 +924,7 @@ def sync_timestamps_per_plane(
     Raises
     ------
     ValueError
-        If the plane count is odd, or if a plane's coupled index does not match
+        If the plane count is odd, or if a plane's pair index does not match
         its position.
     """
     count = len(planes)
@@ -925,12 +937,12 @@ def sync_timestamps_per_plane(
     result: Dict[str, np.ndarray] = {}
     for position, plane in enumerate(planes):
         group = position // 2
-        coupled = plane["coupled_plane_index"]
-        if coupled is not None and coupled != group:
+        declared = plane[PLANE_GROUP_KEY]
+        if declared is not None and declared != group:
             raise ValueError(
                 f"Plane {plane['plane_id']} is at position {position} "
-                f"(temporal group {group}) but declares coupled index "
-                f"{coupled}; the acquisition metadata and "
+                f"(temporal group {group}) but its coupling puts it in pair "
+                f"{declared}; the acquisition metadata and "
                 f"the plane ordering disagree."
             )
         result[plane["plane_id"]] = sync_timestamps[group::groups]
@@ -1011,9 +1023,7 @@ def add_plane_lab_metadata(
                 name=plane["plane_id"],
                 imaging_depth=str(plane["depth"]) if plane["depth"] is not None else "",
                 imaging_plane_group=(
-                    str(plane["coupled_plane_index"])
-                    if plane["coupled_plane_index"] is not None
-                    else "-1"
+                    str(plane[PLANE_GROUP_KEY]) if plane[PLANE_GROUP_KEY] is not None else "-1"
                 ),
                 field_of_view_width=str(plane["width"]) if plane["width"] is not None else "",
                 field_of_view_height=str(plane["height"]) if plane["height"] is not None else "",

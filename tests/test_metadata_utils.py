@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Optional, Sequence
 from unittest.mock import patch
 
+import numpy as np
 from aind_data_schema.core.processing import Processing
 from aind_data_schema_models.process_names import ProcessName
 from aind_pophys_metadata import SchemaVersion
 from aind_pophys_metadata.runner import stage_guard
 
+from aind_ophys_nwb_library import nwb_builders as nb
 from aind_ophys_nwb_library.utils import metadata_utils as mu
 from tests import fixtures
 
@@ -89,6 +91,17 @@ class TestPlaneFields(unittest.TestCase):
         planes = self._planes("acquisition.json", fixtures.v2_acquisition())
         self.assertEqual([plane["plane_id"] for plane in planes], ["VISp_0", "VISl_1"])
         self.assertEqual([plane["plane_index"] for plane in planes], [0, 1])
+
+    def test_v2_coupled_pairs_time_together(self) -> None:
+        """Partners in a v2 acquisition share one temporal group's timestamps."""
+        planes = self._planes("acquisition.json", fixtures.v2_acquisition(plane_count=4))
+        edges = np.arange(20, dtype=float)
+        per_plane = nb.sync_timestamps_per_plane(planes, edges)
+        ids = [plane["plane_id"] for plane in planes]
+        np.testing.assert_array_equal(per_plane[ids[0]], edges[0::2])
+        np.testing.assert_array_equal(per_plane[ids[1]], edges[0::2])
+        np.testing.assert_array_equal(per_plane[ids[2]], edges[1::2])
+        np.testing.assert_array_equal(per_plane[ids[3]], edges[1::2])
 
     def test_planes_are_sorted_before_being_paired_with_ids(self) -> None:
         """Records arrive unsorted, so the id pairing must sort first."""
