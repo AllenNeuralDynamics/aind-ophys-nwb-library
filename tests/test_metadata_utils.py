@@ -282,6 +282,22 @@ class TestLoadNwbMetadata(unittest.TestCase):
         self.assertEqual(metadata.emission_wavelength, float(fixtures.EMISSION_NM))
         self.assertEqual(metadata.indicator, fixtures.GENOTYPE)
 
+    def test_v2_subject_genotype_is_the_indicator(self) -> None:
+        """v2 subject.json keeps the genotype under subject_details."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _raw_mount(
+                tmp,
+                "acquisition.json",
+                fixtures.v2_acquisition(),
+                subject={
+                    "subject_id": fixtures.SUBJECT_ID,
+                    "subject_details": {"genotype": fixtures.GENOTYPE},
+                },
+            )
+            metadata = mu.load_nwb_metadata(root)
+        self.assertEqual(metadata.genotype, fixtures.GENOTYPE)
+        self.assertEqual(metadata.indicator, fixtures.GENOTYPE)
+
     def test_minimal_input(self) -> None:
         """A flat minimal metadata.json reads through the same normalized path.
 

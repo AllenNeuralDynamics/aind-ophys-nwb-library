@@ -288,7 +288,9 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
     # version.
     frame_rate = core.get_frame_rate(required=True)
 
-    genotype = (core.subject_raw or {}).get("genotype")
+    subject = core.subject_raw or {}
+    # v1 keeps the genotype at the top level, v2 under subject_details.
+    genotype = subject.get("genotype") or (subject.get("subject_details") or {}).get("genotype")
     indicator = get_injection_material(procedures_raw) or genotype
     return NwbMetadata(
         schema_version=str(core.version),
