@@ -242,14 +242,14 @@ def instrument_description(instrument_id: Optional[str]) -> str:
     Parameters
     ----------
     instrument_id : str or None
-        v1 ``rig_id`` / v2 ``instrument_id``.
+        v1 ``rig_id`` (``MESO.2``) / v2 ``instrument_id`` (``422_MESO2_20260122``).
 
     Returns
     -------
     str
         A human-readable description.
     """
-    if instrument_id and instrument_id.upper().startswith("MESO"):
+    if instrument_id and "MESO" in instrument_id.upper():
         return MESOSCOPE_DESCRIPTION
     return f"AIND 2P rig {instrument_id}" if instrument_id else "Unknown 2P rig"
 
@@ -322,7 +322,10 @@ EXTRACTION_COLUMN_SPECS = (
 ) + tuple((stat, f"suite2p ROI stat: {stat}") for stat in SUITE2P_ROI_STATS)
 
 
-def _roi_table_columns(include_classification: bool) -> Tuple[list, list]:
+def _roi_table_columns(
+    include_classification: bool,
+    empty_dtypes: Optional[Dict[str, np.dtype]] = None,
+) -> Tuple[list, list]:
     """Return the roi_table VectorData columns and their names.
 
     Parameters
@@ -330,6 +333,9 @@ def _roi_table_columns(include_classification: bool) -> Tuple[list, list]:
     include_classification : bool
         Whether the classifier's four columns are available. The
         extraction-derived columns are always included.
+    empty_dtypes : dict of str to numpy.dtype, optional
+        For a plane with no ROIs, each column's dtype. An empty column without
+        one cannot be written.
 
     Returns
     -------
@@ -341,7 +347,14 @@ def _roi_table_columns(include_classification: bool) -> Tuple[list, list]:
     specs = list(EXTRACTION_COLUMN_SPECS)
     if include_classification:
         specs = list(CLASSIFICATION_COLUMN_SPECS) + specs
-    columns = [VectorData(name=name, description=desc) for name, desc in specs]
+    columns = [
+        VectorData(
+            name=name,
+            description=desc,
+            **({"data": np.empty(0, dtype=empty_dtypes[name])} if empty_dtypes else {}),
+        )
+        for name, desc in specs
+    ]
     return columns, [name for name, _ in specs]
 
 
@@ -477,7 +490,7 @@ def _add_neuropil_segmentation(
     extraction_h5: Path,
     img_seg: ImageSegmentation,
     imaging_plane: ImagingPlane,
-    resolution: float,
+    resolution: Optional[float],
 ) -> Optional[GrayscaleImage]:
     """Add the neuropil segmentation table and return its label image.
 
@@ -489,8 +502,8 @@ def _add_neuropil_segmentation(
         The segmentation container to add the table to.
     imaging_plane : ImagingPlane
         The plane the table belongs to.
-    resolution : float
-        Pixel resolution recorded on the returned image.
+    resolution : float or None
+        Pixel resolution recorded on the returned image; ``None`` when unknown.
 
     Returns
     -------
@@ -557,7 +570,7 @@ def _as_grayscale(image: np.ndarray, path: Path) -> np.ndarray:
 def _summary_images(
     artifacts: PlaneArtifacts,
     approach: SegmentationApproach,
-    resolution: float,
+    resolution: Optional[float],
     neuropil_image: Optional[GrayscaleImage],
 ) -> list:
     """Build the summary GrayscaleImages for one plane.
@@ -568,8 +581,8 @@ def _summary_images(
         Resolved upstream artifacts for this plane.
     approach : SegmentationApproach
         How the ROIs were segmented; selects the segmentation-mask source.
-    resolution : float
-        Pixel resolution recorded on every image.
+    resolution : float or None
+        Pixel resolution recorded on every image; ``None`` when unknown.
     neuropil_image : GrayscaleImage or None
         The neuropil label image, appended when present.
 
