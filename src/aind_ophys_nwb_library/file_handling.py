@@ -1,280 +1,282 @@
-# copied from comb
+"""Discovery of the upstream step artifacts packaged into the NWB file."""
 
-import json
-
-# set up logger
 import logging
-import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from aind_pophys_metadata import find_one, search
 
 logger = logging.getLogger(__name__)
 
-
-MULTIPLANE_FILE_PARTS = {
-    "processing_json": "processing.json",
-    "params_json": "params.json",
-    "registered_metrics_json": "registered_metrics.json",
-    "average_projection_png": "average_projection.png",
-    "max_projection_png": "maximum_projection.png",
-    "motion_transform_csv": "motion_transform.csv",
+# Filename suffix of every upstream artifact the NWB builders actually read.
+#
+# Only what is consumed is listed. Notably absent is ``processing.json``: v2
+# steps write it unprefixed, so globbing for it would match every plane's
+# and no builder reads it anyway.
+ARTIFACT_PARTS: Dict[str, str] = {
+    # aind-ophys-extraction -> <plane>/extraction/<plane>_extraction.h5
     "extraction_h5": "extraction.h5",
+    # aind-ophys-dff -> <plane>/dff/<plane>_dff.h5
     "dff_h5": "dff.h5",
-    "extract_traces_json": "extract_traces.json",
+    # aind-ophys-oasis-event-detection -> <plane>/events/<plane>_events_oasis.h5
     "events_oasis_h5": "events_oasis.h5",
-    "classifier_h5": "classification.h5",
+    # aind-ophys-classifier -> <plane>/classification/<plane>_classification.h5
+    "classification_h5": "classification.h5",
+    # aind-ophys-motion-correction -> <plane>/motion_correction/<plane>_*.png
+    "average_projection_png": "average_projection.png",
+    "maximum_projection_png": "maximum_projection.png",
 }
 
+# Traces and ROI masks come from the extraction file; without it there is
+# nothing to package. Everything else degrades to an omitted NWB container.
+REQUIRED_ARTIFACTS: Tuple[str, ...] = ("extraction_h5",)
 
-def singleplane_session_data_files(input_path: Union[str, Path]):
-    """Find all data files in a single-plane session directory.
+EPOCH_LOCATIONS_JSON = "epoch_locations.json"
+
+
+@dataclass(frozen=True)
+class PlaneArtifacts:
+    """Resolved upstream artifact paths for one imaging plane.
+
+    Only ``extraction_h5`` is guaranteed non-``None``.
+    """
+
+    plane_id: str
+    extraction_h5: Path
+    dff_h5: Optional[Path] = None
+    events_oasis_h5: Optional[Path] = None
+    classification_h5: Optional[Path] = None
+    average_projection_png: Optional[Path] = None
+    maximum_projection_png: Optional[Path] = None
+
+
+def find_artifact(
+    search_root: Path,
+    part: str,
+    plane_id: Optional[str] = None,
+) -> Optional[Path]:
+    """Return the first recursive match for an upstream artifact.
 
     Parameters
     ----------
-    input_path : str or Path
-        The parent processed directory containing the single-plane data.
+    search_root : Path
+        Directory searched recursively, following symlinked directories (the
+        ``processed`` mount).
+    part : str
+        Artifact filename suffix, e.g. ``"extraction.h5"``.
+    plane_id : str, optional
+        Canonical plane id. When given, only files whose name starts with
+        ``f"{plane_id}_"`` match. When ``None`` the prefix is not required.
 
     Returns
     -------
-    dict
-        A dictionary containing the file paths for each data file.
+    Path or None
+        The first match in sorted order, or ``None`` when there is none.
     """
-    input_path = Path(input_path)
-
-    # There should be exactly one subfolder inside
-    # the single-plane parent folder
-    img_path = ""
-    subfolders = [f for f in input_path.iterdir() if f.is_dir()]
-    if len(subfolders) == 1:
-        singleplane_data_path = subfolders[0]
-    if len(subfolders) == 0:
-        singleplane_data_path = input_path
-
-    for subfolder in subfolders:
-        if "capsule" in subfolder.name:
-            singleplane_data_path = subfolder
-        # newer assets have the motion_correcton in its own folder
-        if "MOp2_3_0" in subfolder.name:
-            img_path = subfolder / "motion_correction"
-        
-
-    # This is the actual data directory
-
-    data_files = {}
-    for key, value in MULTIPLANE_FILE_PARTS.items():
-        data_files[key] = find_data_file(
-            singleplane_data_path, value
-        )  # Search in the subfolder
-
-    if img_path != "":
-        data_files['max_projection_png'] = find_data_file(
-            img_path, "maximum_projection.png"
-        )  # Search in the subfolder
-        data_files['average_projection_png'] = find_data_file(
-            img_path, "average_projection.png"
-        )  # Search in the subfolder
-
-    return data_files
+    matches = find_artifacts(search_root, part, plane_id)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning(
+            "%s matches for '%s%s' under %s; using %s",
+            len(matches),
+            f"{plane_id}_" if plane_id else "",
+            part,
+            search_root,
+            matches[0],
+        )
+    return matches[0]
 
 
-def multiplane_session_data_files(input_path: Union[str, Path], plane: str):
-    """Find all data files in a multiplane session directory.
+def find_artifacts(
+    search_root: Path,
+    part: str,
+    plane_id: Optional[str] = None,
+) -> List[Path]:
+    """Return every match for an artifact suffix, in sorted order.
 
     Parameters
     ----------
-    input_path : str or Path
-        The path to the directory to search.
-    plane : str
-        The plane name.
+    search_root : Path
+        Directory searched recursively, following symlinked directories.
+    part : str
+        Artifact filename suffix, e.g. ``"extraction.h5"``.
+    plane_id : str, optional
+        Canonical plane id. When given, only files whose name starts with
+        ``f"{plane_id}_"`` match. When ``None`` the prefix is not required.
 
     Returns
     -------
-    dict
-        A dictionary containing the file paths for each data file.
+    list of Path
+        All matches, sorted for determinism; empty when there are none.
     """
-    input_path = Path(input_path)
-    data_files = {}
-    for key, value in MULTIPLANE_FILE_PARTS.items():
-        data_files[key] = find_data_file(input_path, plane + "_" + value)
-    return data_files
+    prefix = f"{plane_id}_" if plane_id else ""
+    return search(Path(search_root), f"{prefix}*{part}")
 
 
-def find_data_file(input_path, file_part, verbose=False):
-    """Find a file in a directory given a partial file name.
+def collect_plane_artifacts(
+    search_root: Path,
+    plane_id: str,
+    *,
+    allow_unprefixed: bool = False,
+) -> PlaneArtifacts:
+    """Resolve every upstream artifact for one plane.
 
     Parameters
     ----------
-    input_path : str or Path
-        The path to the directory to search.
-    file_part : str
-        The partial file name to search for.
+    search_root : Path
+        The ``processed`` mount, searched recursively.
+    plane_id : str
+        Canonical plane id (``"VISp_0"`` multi-plane, ``"plane_0"`` single).
+    allow_unprefixed : bool, optional
+        When ``True``, fall back to an unprefixed match if the
+        ``<plane_id>_`` prefixed glob finds nothing. Only safe for a
+        single-plane session, where the upstream ``unique_id`` is derived from
+        the movie filename and therefore need not equal ``plane_0``.
+
+    Returns
+    -------
+    PlaneArtifacts
+        The resolved paths.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a required artifact cannot be located; the message names the glob
+        pattern and the directory searched.
+    ValueError
+        If ``allow_unprefixed`` and more than one unprefixed candidate matches.
     """
-    input_path = Path(input_path)
-    try:
-        file = list(input_path.glob(f"**/*{file_part}*"))[0]
-    except IndexError:
-        if verbose:
+    resolved: Dict[str, Optional[Path]] = {}
+    for key, part in ARTIFACT_PARTS.items():
+        match = find_artifact(search_root, part, plane_id)
+        if match is None and allow_unprefixed:
+            # The prefix is the only thing tying an artifact to a plane, so
+            # dropping it is safe ONLY when the mount is unambiguous. If more
+            # than one candidate exists the metadata and the mount disagree
+            # about how many planes there are, and picking sorted()[0] would
+            # publish one plane's data under another plane's name while
+            # exiting 0 -- the worst possible outcome for a terminal stage.
+            candidates = find_artifacts(search_root, part)
+            if len(candidates) > 1:
+                raise ValueError(
+                    f"The acquisition metadata resolved a single plane "
+                    f"({plane_id}), but {len(candidates)} files match "
+                    f"'*{part}' under {search_root}: "
+                    f"{', '.join(str(c) for c in candidates)}. Refusing to "
+                    f"guess which one is {plane_id} -- publishing another "
+                    f"plane's data under this name would be silent. Check "
+                    f"whether the acquisition metadata is missing planes."
+                )
+            match = candidates[0] if candidates else None
+            if match is not None:
+                logger.info(
+                    "Resolved '%s' for %s without the plane prefix: %s",
+                    part,
+                    plane_id,
+                    match,
+                )
+        if match is None:
+            if key in REQUIRED_ARTIFACTS:
+                raise FileNotFoundError(
+                    f"Required upstream artifact '{plane_id}_*{part}' not "
+                    f"found under {search_root}. NWB packaging is the "
+                    f"terminal stage, so the producing step either did "
+                    f"not run for this plane or wrote a different filename."
+                )
             logger.warning(
-                f"File with '{file_part}' not found in {input_path}"
+                "No match for '%s_*%s' under %s; the corresponding NWB "
+                "container will be omitted for this plane.",
+                plane_id,
+                part,
+                search_root,
             )
-        file = None
-    return file
+        resolved[key] = match
+    return PlaneArtifacts(plane_id=plane_id, **resolved)
 
 
-def get_file_paths_dict(file_parts_dict, input_path):
-    file_paths = {}
-    for key, value in file_parts_dict.items():
-        file_paths[key] = find_data_file(input_path, value)
-    return file_paths
-
-
-def check_ophys_folder(path):
-    """ophys folders can have multiple names, check for all of them"""
-    ophys_names = ["ophys", "pophys", "mpophys"]
-    ophys_folder = None
-    for ophys_name in ophys_names:
-        ophys_folder = path / ophys_name
-        if ophys_folder.exists():
-            break
-        else:
-            ophys_folder = None
-
-    return ophys_folder
-
-
-def check_behavior_folder(path):
-    behavior_names = ["behavior", "behavior_videos"]
-    behavior_folder = None
-    for behavior_name in behavior_names:
-        behavior_folder = path / behavior_name
-        if behavior_folder.exists():
-            break
-        else:
-            behavior_folder = None
-    return behavior_folder
-
-
-def get_sync_file_path(input_path, verbose=False):
-    """Find the Sync file"""
-    file_parts = {}
-    input_path = Path(input_path)
-    try:
-        # method 1: find sync_file by name
-        file_parts = {"sync_h5": "_sync.h5"}
-        sync_file_path = find_data_file(
-            input_path, file_parts["sync_h5"], verbose=False
-        )
-    except IndexError:
-        if verbose:
-            logger.info(
-                "file with '*_sync.h5' not found, trying platform json"
-            )
-
-    if sync_file_path is None:
-        # method 2: load platform json
-        # Note: sometimes fails if platform json has incorrect sync_file path
-        logging.info(
-            f"Trying to find sync file using platform json for {input_path}"
-        )
-        file_parts = {"platform_json": "_platform.json"}
-        platform_path = find_data_file(
-            input_path, file_parts["platform_json"]
-        )
-        with open(platform_path, "r") as f:
-            platform_json = json.load(f)
-        ophys_folder = check_ophys_folder(input_path)
-        sync_file_path = ophys_folder / platform_json["sync_file"]
-
-        if not sync_file_path.exists():
-            logger.error(
-                f"Unsupported data asset structure, \
-                    sync file not found in {sync_file_path}"
-            )
-            sync_file_path = None
-        else:
-            logger.info(f"Sync file found in {sync_file_path}")
-
-    return sync_file_path
-
-
-def plane_paths_from_session(
-    session_path: Union[Path, str],
-    data_level: str = "raw",
-    fovs: List = [],
-    single_plane: bool = False,
-) -> list:
-    """Get plane paths from a session directory,
-        supporting both singleplane and multiplane cases.
+def collect_session_artifacts(
+    search_root: Path,
+    plane_ids: Sequence[str],
+) -> List[PlaneArtifacts]:
+    """Resolve upstream artifacts for every plane in the session.
 
     Parameters
     ----------
-    session_path : Union[Path, str]
-        Path to the session directory
-    data_level : str, optional
-        Data level, by default "raw". Options: "raw", "processed"
-    fovs: List, optional
-        List of ophys fovs. Should be provided for all processed assets
-    single_plane: bool, optional
-        Bool indicating whether the sess is single_plane
+    search_root : Path
+        The ``processed`` mount, searched recursively.
+    plane_ids : sequence of str
+        Canonical plane ids in acquisition order.
 
     Returns
     -------
-    list
-        List of plane paths
+    list of PlaneArtifacts
+        One entry per plane, in the same order as ``plane_ids``.
+
+    Raises
+    ------
+    ValueError
+        If ``plane_ids`` is empty.
     """
-    session_path = (
-        Path(session_path) if isinstance(session_path, str) else session_path
-    )
-
-    if single_plane:
-        return [session_path]  # Singleplane session (no subdirectories)
-
-    if fovs != [] and data_level == "processed":
-        planes = []
-        for fov in fovs:
-            fov_plane = fov["targeted_structure"]
-            fov_index = fov["index"]
-            fov_pair = fov_plane + "_" + str(fov_index)
-            planes.append(fov_pair)
-    elif fovs == [] and data_level == "processed":
-        raise ValueError("No Ophys fovs")
-    if data_level == "raw":
-        planes = [
-            f for f in (session_path / "pophys").glob("*") if f.is_dir()
-        ]
-    return planes
+    if not plane_ids:
+        raise ValueError(
+            "No imaging planes resolved from the acquisition metadata; "
+            "refusing to write an empty NWB file."
+        )
+    single_plane = len(plane_ids) == 1
+    return [
+        collect_plane_artifacts(
+            search_root,
+            plane_id,
+            allow_unprefixed=single_plane,
+        )
+        for plane_id in plane_ids
+    ]
 
 
-def get_ophys_processed_file_paths(processed_path: Union[Path, str]) -> dict:
-    """
-    Create a dictionary of file paths for a processed ophys session,
-        supporting both singleplane and multiplane.
+def find_epoch_locations(search_root: Path) -> Optional[Path]:
+    """Locate an ``epoch_locations.json`` under the processed mount.
 
     Parameters
     ----------
-    processed_path : Union[Path, str]
-        Path to the processed ophys session folder.
+    search_root : Path
+        The ``processed`` mount, searched recursively, following symlinked
+        directories.
 
     Returns
     -------
-    dict
-        A dictionary containing file paths for each plane
-            (or the session folder in singleplane).
+    Path or None
+        The first match, or ``None`` when the session has no epochs.
     """
-    processed_path = Path(processed_path)
+    return find_one(search_root, EPOCH_LOCATIONS_JSON, required=False)
 
-    processed_plane_paths = plane_paths_from_session(
-        processed_path, data_level="processed"
+
+def find_sync_file(raw_root: Path) -> Optional[Path]:
+    """Locate the raw sync HDF5 file for a multiplane session.
+
+    Patterns are tried in order: ``*pophys/data_main.h5``, ``behavior/*.h5``,
+    then ``*ophys/*.h5``.
+
+    Parameters
+    ----------
+    raw_root : Path
+        The ``raw`` mount, searched recursively, following symlinked
+        directories.
+
+    Returns
+    -------
+    Path or None
+        The sync file, or ``None`` when none of the patterns match.
+    """
+    patterns = ("*pophys/data_main.h5", "behavior/*.h5", "*ophys/*.h5")
+    for pattern in patterns:
+        match = find_one(raw_root, pattern, required=False)
+        if match is not None:
+            return match
+    logger.error(
+        "No sync file found under %s (tried %s)",
+        raw_root,
+        ", ".join(patterns),
     )
-
-    file_paths = {"planes": {}, "processed_path": processed_path}
-
-    for plane_path in processed_plane_paths:
-        plane_path = Path(plane_path)
-        plane = plane_path.name
-        file_paths["planes"][plane] = multiplane_session_data_files(
-            plane_path
-        )  # Replace with singleplane logic if needed
-        file_paths["planes"][plane]["processed_plane_path"] = plane_path
-
-    return file_paths
+    return None
