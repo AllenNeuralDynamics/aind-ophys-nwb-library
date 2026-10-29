@@ -1,42 +1,34 @@
-import argparse
-import fnmatch
-import json
+"""pynwb object construction from upstream ophys pipeline artifacts."""
+
 import logging
-import os
-from collections import defaultdict
 from enum import Enum
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import Dict, Optional, Tuple
 
-# capsule
-import file_handling
 import h5py
-import imageio
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pynwb
 import sparse
-import aind_nwb_utils.utils as nwb_utils
-from aind_behavior_utils.sync.sync_dataset import SyncDataset
 from hdmf.common import VectorData
 from hdmf_zarr import NWBZarrIO
 from pynwb import NWBFile
-from pynwb.epoch import TimeIntervals
-from pynwb.image import GrayscaleImage, Images, ImageSeries
+from pynwb.image import GrayscaleImage
 from pynwb.ophys import (
-    DfOverF,
-    Fluorescence,
-    ImagingPlane,
     ImageSegmentation,
+    ImagingPlane,
     OpticalChannel,
-    RoiResponseSeries,
+    PlaneSegmentation,
 )
 
+from .file_handling import PlaneArtifacts
+from .utils.metadata_utils import NwbMetadata
 
-# Per-ROI suite2p morphology stats to surface from the extraction file's
-# rois/ group into the NWB roi_table (as suite2p_* columns).
-SUITE2P_ROI_STATS = (
+logger = logging.getLogger(__name__)
+
+# Per-ROI suite2p morphology stats surfaced from the extraction file's rois/
+# group into the NWB roi_table.
+SUITE2P_ROI_STATS: Tuple[str, ...] = (
     "aspect_ratio",
     "compact",
     "solidity",
@@ -44,381 +36,641 @@ SUITE2P_ROI_STATS = (
     "footprint",
 )
 
+EXTENSION_NAMESPACE_NAME = "ndx-aibs-behavior-ophys"
+EXTENSION_TYPE = "OphysMetadataSchema"
+
+OPTICAL_CHANNEL_NAME = "channel_0"
+# GCaMP6 emission placeholder, used only when the acquisition metadata carries
+# no per-channel emission wavelength (always the case for v1 input).
+DEFAULT_EMISSION_LAMBDA = 514.0
+MESOSCOPE_DESCRIPTION = "AIND Multiplane Mesoscope 2P Rig"
+
 
 class SegmentationApproach(Enum):
+    """How suite2p produced the ROI masks in an extraction file."""
+
     SUITE2P_ANATOMICAL = {
         "method": "suite2p-cellpose",
-        "description": "Suite2p's anatomical mode using either "
-        "the max or mean projection",
+        "description": ("Suite2p's anatomical mode using either the max or mean projection"),
     }
     SUITE2P_ACTIVITY = {
         "method": "suite2p-functional",
-        "description": "Suite2p's activity-based ROI detection using "
-        "'sparse mode''",
+        "description": "Suite2p's activity-based ROI detection using 'sparse mode'",
     }
 
 
-def load_pynwb_extension(path):
-    neurodata_type = "OphysMetadataSchema"
-    pynwb.load_namespaces(path)
-    return pynwb.get_class(neurodata_type, "ndx-aibs-behavior-ophys")
-
-
-def add_tiffs_to_nwb(
-    directory: Union[str, Path], suffix: str, nwb_file: NWBFile
-):
-    """Add specific TIFF frames as an ImageSeries to an NWB file.
+def load_pynwb_extension(path: Path) -> type:
+    """Load the ndx-aibs-behavior-ophys namespace and return its metadata type.
 
     Parameters
     ----------
-    directory : str or Path
-        The directory containing the TIFF and CSV files.
-    suffix : str
-        The suffix used to match corresponding TIFF and CSV files.
-    nwb_file : NWBFile
-        The NWB file object to which the ImageSeries will be added.
+    path : Path
+        Path to ``ndx-aibs-behavior-ophys.namespace.yaml``.
 
     Returns
     -------
-    NWBFile
-        The updated NWB file with the added ImageSeries.
+    type
+        The generated ``OphysMetadataSchema`` class.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the namespace YAML is missing.
     """
-
-    # Get all .tif files matching the suffix
-    tiff_files = sorted(
-        [
-            f
-            for f in os.listdir(directory)
-            if fnmatch.fnmatch(f, f"*{suffix}*.tif")
-        ]
-    )
-
-    if not tiff_files:
-        raise ValueError(
-            f"No TIFF files found with suffix '{suffix}' in {directory}"
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"pynwb extension namespace not found at {path}. It must be "
+            f"committed under the Code Ocean capsule's code/ directory, which is the "
+            f"only part of the repo main.nf stages."
         )
-
-    # Find the first associated CSV file
-    csv_files = sorted(
-        [
-            f
-            for f in os.listdir(directory)
-            if fnmatch.fnmatch(f, f"*{suffix}*.csv")
-        ]
-    )
-
-    if not csv_files:
-        raise ValueError(
-            f"No CSV file found for suffix '{suffix}' in {directory}"
-        )
-
-    csv_path = os.path.join(
-        directory, csv_files[0]
-    )  # Use the first CSV file found
-
-    # Load frame numbers and timestamps from CSV
-    df = pd.read_csv(
-        csv_path
-    )  # Assuming CSV has "frameNumber" and "timestamp" columns
-
-    if "frameNumber" not in df.columns or "timestamp" not in df.columns:
-        return nwb_file
-
-    valid_frames = set(df["frameNumber"])  # The frames we want to extract
-    frame_to_time = dict(
-        zip(df["frameNumber"], df["timestamp"])
-    )  # Map frameNumber to timestamp
-
-    images = []
-    timestamps = []
-
-    # Read all images but only store the ones in 'valid_frames'
-    for filename in tiff_files:
-        filepath = Path(directory) / filename
-        reader = imageio.get_reader(filepath)  # Open TIFF stack reader
-
-        for frame_index, frame in enumerate(reader):
-            if frame_index in valid_frames:  # Only keep frames from CSV
-                images.append(frame)
-                timestamps.append(
-                    frame_to_time[frame_index]
-                )  # Assign timestamp
-
-    if not images:
-        raise ValueError("No matching frames found in TIFF files.")
-
-    # Store images as a single ImageSeries with timestamps
-    img_series = ImageSeries(
-        name=f"image_series_{suffix}",
-        data=images,  # Store images as a list
-        unit="pixels",
-        format="raw",
-        timestamps=timestamps,  # Assign timestamps from CSV
-    )
-
-    # Add ImageSeries to NWB
-    nwb_file.add_acquisition(img_series)
-    return nwb_file
+    pynwb.load_namespaces(str(path))
+    return pynwb.get_class(EXTENSION_TYPE, EXTENSION_NAMESPACE_NAME)
 
 
-def load_signals(
-    h5_file: Path,
-    plane_segmentation: ImageSegmentation,
-    h5_group=None,
-    h5_key=None,
-) -> tuple:
-    """Loads extracted signal data from aind-ophys-extraction-suite2p
-
-    Parameters
-    ----------
-    h5_file: Path
-        Path to h5_file
-    ps: ImageSegmentation
-        nwb segmented object
-    h5_group: str
-        Group to access key in h5 file
-    h5_key: str
-        Key to extract data from
-
-    Returns
-    -------
-    (np.array, ImageSegmentation)
-        Trace array and updated segmentation object
-    """
-    if not h5_group:
-        with h5py.File(h5_file, "r") as f:
-            traces = f[h5_key][:]
-    else:
-        with h5py.File(h5_file, "r") as f:
-            traces = f[h5_group][h5_key][:]
-    index = traces.shape[0]
-
-    roi_names = np.arange(index).tolist()
-    rt_region = plane_segmentation.create_roi_table_region(
-        region=roi_names, description="List of measured ROIs"
-    )
-
-    return traces, rt_region
-
-
-def load_generic_group(h5_file: Path, h5_group=None, h5_key=None) -> np.array:
-    """Loads extracted signal data from aind-ophys-extraction-suite2p
-
-    Parameters
-    ----------
-    h5_file: Path
-        Path to h5_file
-    h5_group: str
-        Group to access key in h5 file
-    h5_key: str
-        Key to extract data from
-
-    Returns
-    -------
-    (np.array)
-        data array
-    """
-    if h5_group:
-        with h5py.File(h5_file, "r") as f:
-            return f[h5_group][h5_key][:]
-    else:
-        with h5py.File(h5_file, "r") as f:
-            return f[h5_key][:]
-
-
-def load_sparse_array(h5_file):
-    """Obtain pixel masks from the h5 file
+def load_dataset(h5_file: Path, key: str, group: Optional[str] = None) -> np.ndarray:
+    """Read one dataset out of an upstream HDF5 file.
 
     Parameters
     ----------
     h5_file : Path
-        The path to the h5 file
+        Path to the HDF5 file.
+    key : str
+        Dataset name.
+    group : str, optional
+        Group containing ``key``; read from the root when omitted.
 
     Returns
     -------
-    np.array
-        The pixel masks
+    numpy.ndarray
+        The dataset contents.
     """
-    with h5py.File(h5_file) as f:
+    with h5py.File(h5_file, "r") as f:
+        node = f[group][key] if group else f[key]
+        return node[:]
+
+
+def try_load_dataset(
+    h5_file: Optional[Path],
+    key: str,
+    group: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    """Read an optional dataset, logging rather than swallowing a failure.
+
+    Parameters
+    ----------
+    h5_file : Path or None
+        Path to the HDF5 file, or ``None`` when the artifact is absent.
+    key : str
+        Dataset name.
+    group : str, optional
+        Group containing ``key``.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        The dataset, or ``None`` when the file or the key is missing.
+    """
+    if h5_file is None:
+        return None
+    try:
+        return load_dataset(h5_file, key, group)
+    except (KeyError, OSError) as exc:
+        logger.warning(
+            "Could not read %s%s from %s: %s",
+            f"{group}/" if group else "",
+            key,
+            h5_file,
+            exc,
+        )
+        return None
+
+
+def load_roi_masks(extraction_h5: Path) -> np.ndarray:
+    """Expand the sparse ROI footprints in an extraction file to dense masks.
+
+    Parameters
+    ----------
+    extraction_h5 : Path
+        Path to ``<plane>_extraction.h5``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Dense boolean-ish array of shape ``(n_rois, height, width)``.
+    """
+    with h5py.File(extraction_h5, "r") as f:
         data = f["rois"]["data"][:]
         coords = f["rois"]["coords"][:]
         shape = f["rois"]["shape"][:]
-
-    pixelmasks = sparse.COO(coords, data, shape).todense()
-    return pixelmasks
+    return sparse.COO(coords, data, shape).todense()
 
 
-def load_neuropil_masks_and_r_values(h5_file: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Load neuropil pixel masks and r-values from the h5 file
+def load_neuropil_masks_and_r_values(
+    extraction_h5: Path,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load neuropil pixel masks and per-ROI neuropil r-values.
 
     Parameters
     ----------
-    h5_file : Path
-        The path to the h5 file
+    extraction_h5 : Path
+        Path to ``<plane>_extraction.h5``.
 
     Returns
     -------
-    np.ndarray
-        Dense array of shape (n_rois, height, width) with neuropil masks
-    np.ndarray
-        Array of shape (n_rois,) with r-values for each neuropil mask
+    numpy.ndarray
+        Boolean array of shape ``(n_rois, height, width)``.
+    numpy.ndarray
+        Per-ROI neuropil correction coefficients.
     """
-    with h5py.File(h5_file, "r") as f:
+    with h5py.File(extraction_h5, "r") as f:
         indices = f["rois"]["neuropil_coords"][:].T
         shape = f["rois"]["shape"][:]
-
         r_values = f["traces"]["neuropil_rcoef"][:]
-
     neuropil_mask = np.zeros(shape, dtype=bool)
     neuropil_mask[indices[:, 0], indices[:, 1], indices[:, 2]] = True
     return neuropil_mask, r_values
 
 
-def add_neuropil_segmentation_and_r_values(
-    extraction_h5: Path,
-    img_seg: ImageSegmentation,
-    imaging_plane: ImagingPlane,
-    resolution: float = 1.0,
-) -> "GrayscaleImage | None":
-    """Add neuropil segmentation masks and r-values to an ImageSegmentation object,
-    and return a GrayscaleImage of the collapsed neuropil mask.
+def collapse_masks_to_label_image(masks: np.ndarray) -> np.ndarray:
+    """Collapse 3-D per-ROI masks into a 2-D 1-based label image.
+
+    Parameters
+    ----------
+    masks : numpy.ndarray
+        Array of shape ``(n_rois, height, width)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(height, width)`` array whose pixels hold the 1-based index of the
+        mask covering them (0 = no mask). All zeros when there are no ROIs.
+    """
+    label_image = np.zeros(masks.shape[1:], dtype="i2")
+    # A plane can legitimately have zero ROIs: extraction's CaImAn branch
+    # emits an empty mask array, and np.argmax raises on one.
+    if masks.shape[0] == 0:
+        return label_image
+    covered = masks.any(0) if masks.dtype == bool else masks.sum(0) > 0
+    label_image[covered] = np.argmax(masks[:, covered], 0) + 1
+    return label_image
+
+
+def segmentation_approach(extraction_h5: Path) -> SegmentationApproach:
+    """Classify how the extraction file's ROIs were segmented.
 
     Parameters
     ----------
     extraction_h5 : Path
-        Path to the extraction HDF5 file containing neuropil coords.
-    img_seg : ImageSegmentation
-        The NWB ImageSegmentation object to add the plane segmentation to.
-    imaging_plane : ImagingPlane
-        The NWB ImagingPlane associated with this segmentation.
-    resolution : float
-        Pixel resolution to set on the returned GrayscaleImage (pixels/cm).
-
-    Returns
-    -------
-    GrayscaleImage or None
-        A GrayscaleImage of the 2-D neuropil mask, or None if creation failed.
-    """
-    try:
-        neuropil_masks, r_values = load_neuropil_masks_and_r_values(extraction_h5)
-        neuropil_plane_segmentation = img_seg.create_plane_segmentation(
-            name="neuropil_table",
-            description="Neuropil segmentation masks from suite2p",
-            imaging_plane=imaging_plane,
-        )
-        for neuropil_mask in neuropil_masks:
-            neuropil_plane_segmentation.add_roi(image_mask=neuropil_mask)
-
-        neuropil_plane_segmentation.add_column(
-            name="neuropil_r_value",
-            description="Coefficients used for neuropil correction",
-            data=r_values,
-        )
-
-        neuropil_mask_2d = convert_neuropil_masks_to_image(neuropil_masks)
-        return GrayscaleImage(
-            name="neuropil_mask_image",
-            data=neuropil_mask_2d,
-            resolution=resolution,
-            description="Neuropil segmentation mask image",
-        )
-    except Exception as e:
-        logging.warning(f"Error adding neuropil segmentation masks: {e}")
-        return None
-
-
-def convert_neuropil_masks_to_image(neuropil_masks: np.ndarray) -> np.ndarray:
-    """Collapse 3D neuropil masks into a 2D label image.
-
-    Parameters
-    ----------
-    neuropil_masks : np.ndarray
-        Boolean array of shape (n_rois, height, width).
-
-    Returns
-    -------
-    np.ndarray
-        2D array of shape (height, width) where each pixel value is the
-        1-based index of the neuropil mask that covers it (0 = no mask).
-    """
-    segmentation_mask = np.zeros(neuropil_masks.shape[1:], dtype="i2")
-    contains_neuropil = neuropil_masks.any(0)
-    segmentation_mask[contains_neuropil] = (
-        np.argmax(neuropil_masks[:, contains_neuropil], 0) + 1
-    )
-    return segmentation_mask
-
-
-def convert_rois_to_segmentation_mask(h5_file):
-    pixelmasks = load_sparse_array(h5_file)
-    segmentation_mask = np.zeros(pixelmasks.shape[1:], dtype="i2")
-    contains_roi = pixelmasks.sum(0) > 0
-    segmentation_mask[contains_roi] = (
-        np.argmax(pixelmasks[:, contains_roi], 0) + 1
-    )
-    return segmentation_mask
-
-
-def get_segementation_approach(extraction_h5: Path) -> SegmentationApproach:
-    """Get the segmentation approach from the extraction file
-
-    Parameters
-    ----------
-    extraction_h5 : Path
-        The path to the extraction file
+        Path to ``<plane>_extraction.h5``.
 
     Returns
     -------
     SegmentationApproach
-        The segmentation approach, either SUITE2P_ANATOMICAL
-        or SUITE2P_ACTIVITY
+        ``SUITE2P_ANATOMICAL`` when a ``cellpose`` group is present, else
+        ``SUITE2P_ACTIVITY``.
     """
     with h5py.File(extraction_h5, "r") as f:
-        if f.get("cellpose", False):
+        if f.get("cellpose") is not None:
             return SegmentationApproach.SUITE2P_ANATOMICAL
-        else:
-            return SegmentationApproach.SUITE2P_ACTIVITY
+    return SegmentationApproach.SUITE2P_ACTIVITY
 
 
-def get_microscope(
-    nwbfile: pynwb.NWBFile,
-    rig_json_data: dict,
-    session_json_data: dict,
-) -> Tuple[pynwb.device.Device, OpticalChannel]:
-    """Get microscope metadata for the NWB file
+def instrument_description(instrument_id: Optional[str]) -> str:
+    """Describe the microscope from its instrument id.
 
     Parameters
     ----------
-    nwbfile : pynwb.NWBFile
-        The NWB file
-    rig_json_data : dict
-        The rig metadata
-    session_json_data : dict
-        The session metadata
+    instrument_id : str or None
+        v1 ``rig_id`` (``MESO.2``) / v2 ``instrument_id`` (``422_MESO2_20260122``).
 
     Returns
     -------
-    Tuple[pynwb.device, OpticalChannel]
-        The device and optical channel
+    str
+        A human-readable description.
     """
-    microscope_name = session_json_data["rig_id"]
-    microscope_desc = rig_json_data["rig_id"]
-    microscope_manufacturer = "Thorlabs"  # TODO UPDATE IN rig.json
-    # optical channels
-    oc1_name = "TODO"
-    oc1_desc = "TODO"
-    oc1_el = 514.0  # TODO placeholder on Gcamp6 for now emission lambda
+    if instrument_id and "MESO" in instrument_id.upper():
+        return MESOSCOPE_DESCRIPTION
+    return f"AIND 2P rig {instrument_id}" if instrument_id else "Unknown 2P rig"
+
+
+def create_microscope(
+    nwbfile: NWBFile,
+    metadata: NwbMetadata,
+) -> Tuple[pynwb.device.Device, OpticalChannel]:
+    """Create the NWB device and optical channel for the acquisition.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The file being built.
+    metadata : NwbMetadata
+        The acquisition metadata.
+
+    Returns
+    -------
+    pynwb.device.Device
+        The microscope device.
+    OpticalChannel
+        The optical channel, using the acquisition's emission wavelength when
+        it carries one.
+    """
+    name = metadata.instrument_id or "unknown-instrument"
     device = nwbfile.create_device(
-        name=microscope_name,
-        description=microscope_desc,
-        manufacturer=microscope_manufacturer,
+        name=name,
+        description=instrument_description(metadata.instrument_id),
+        manufacturer="Thorlabs",
     )
-    optical_channel = OpticalChannel(
-        name=oc1_name,
-        description=oc1_desc,
-        emission_lambda=oc1_el,
+    emission = metadata.emission_wavelength
+    channel = OpticalChannel(
+        name=OPTICAL_CHANNEL_NAME,
+        description=(
+            "Emission wavelength read from the acquisition metadata"
+            if emission is not None
+            else (
+                "Emission wavelength not present in the acquisition "
+                f"metadata; using the {DEFAULT_EMISSION_LAMBDA} nm GCaMP6 "
+                "placeholder"
+            )
+        ),
+        emission_lambda=float(emission if emission is not None else DEFAULT_EMISSION_LAMBDA),
     )
-    return device, optical_channel
+    return device, channel
+
+
+#: roi_table columns sourced from the CLASSIFIER's output. Present only when
+#: the classification file is usable.
+CLASSIFICATION_COLUMN_SPECS = (
+    ("is_soma", "Soma predictions"),
+    ("soma_probability", "Soma probabilities"),
+    ("is_dendrite", "Dendrite predictions"),
+    ("dendrite_probability", "Dendrite probabilities"),
+)
+
+#: roi_table columns sourced from EXTRACTION's own output. Kept separate from
+#: the classification specs so a classifier ROI-count mismatch cannot drop
+#: columns that extraction.h5 supplied perfectly well.
+EXTRACTION_COLUMN_SPECS = (
+    (
+        "cellpose_soma_probability",
+        (
+            "Mean cellpose cell-probability under each ROI footprint "
+            "(probability in [0, 1]); NaN when cellpose segmentation was "
+            "not run"
+        ),
+    ),
+) + tuple((stat, f"suite2p ROI stat: {stat}") for stat in SUITE2P_ROI_STATS)
+
+
+def _roi_table_columns(
+    include_classification: bool,
+    empty_dtypes: Optional[Dict[str, np.dtype]] = None,
+) -> Tuple[list, list]:
+    """Return the roi_table VectorData columns and their names.
+
+    Parameters
+    ----------
+    include_classification : bool
+        Whether the classifier's four columns are available. The
+        extraction-derived columns are always included.
+    empty_dtypes : dict of str to numpy.dtype, optional
+        For a plane with no ROIs, each column's dtype. An empty column without
+        one cannot be written.
+
+    Returns
+    -------
+    list of hdmf.common.VectorData
+        Column definitions.
+    list of str
+        Column names, parallel to the definitions.
+    """
+    specs = list(EXTRACTION_COLUMN_SPECS)
+    if include_classification:
+        specs = list(CLASSIFICATION_COLUMN_SPECS) + specs
+    columns = [
+        VectorData(
+            name=name,
+            description=desc,
+            **({"data": np.empty(0, dtype=empty_dtypes[name])} if empty_dtypes else {}),
+        )
+        for name, desc in specs
+    ]
+    return columns, [name for name, _ in specs]
+
+
+def _classification_columns(
+    artifacts: PlaneArtifacts,
+    num_rois: int,
+) -> Optional[Dict[str, np.ndarray]]:
+    """Load the per-ROI classification columns, or ``None`` when unusable.
+
+    Columns pair with the ROI masks by position; a length mismatch returns
+    ``None``.
+
+    Parameters
+    ----------
+    artifacts : PlaneArtifacts
+        Resolved upstream artifacts for this plane.
+    num_rois : int
+        Number of ROI masks in the extraction file.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray, or None
+        The four classifier columns, or ``None`` when the classification file
+        is absent or disagrees on the ROI count. ``soma/probabilities`` and
+        ``dendrites/probabilities`` are ``predict_proba`` output and stay 2-D
+        ``(n_rois, n_classes)`` here; :func:`_add_rois` takes the positive
+        class off the last column. The extraction-derived columns are built
+        separately by :func:`_extraction_columns`, so they survive a
+        classifier problem.
+    """
+    classification = artifacts.classification_h5
+    if classification is None:
+        logger.warning(
+            "No classification file for %s; roi_table will omit the soma/dendrite columns.",
+            artifacts.plane_id,
+        )
+        return None
+    columns: Dict[str, np.ndarray] = {}
+    for column, group, key in (
+        ("is_soma", "soma", "predictions"),
+        ("soma_probability", "soma", "probabilities"),
+        ("is_dendrite", "dendrites", "predictions"),
+        ("dendrite_probability", "dendrites", "probabilities"),
+    ):
+        values = try_load_dataset(classification, key, group)
+        if values is None:
+            return None
+        if len(values) != num_rois:
+            logger.error(
+                "%s/%s in %s has %s entries but the extraction file has %s "
+                "ROIs; classification columns are paired by positional ROI "
+                "index, so they are omitted rather than misaligned.",
+                group,
+                key,
+                classification,
+                len(values),
+                num_rois,
+            )
+            return None
+        columns[column] = values
+    return columns
+
+
+def _extraction_columns(
+    artifacts: PlaneArtifacts,
+    num_rois: int,
+) -> Dict[str, np.ndarray]:
+    """Load the per-ROI columns that come from ``extraction.h5`` itself.
+
+    A dataset absent from the extraction file becomes an all-NaN column.
+
+    Parameters
+    ----------
+    artifacts : PlaneArtifacts
+        Resolved upstream artifacts for this plane.
+    num_rois : int
+        Number of ROI masks in the extraction file.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        One entry per name in :data:`EXTRACTION_COLUMN_SPECS`.
+    """
+    columns: Dict[str, np.ndarray] = {}
+    cellpose = try_load_dataset(artifacts.extraction_h5, "cellpose_soma_probability", "rois")
+    columns["cellpose_soma_probability"] = (
+        cellpose if cellpose is not None else np.full(num_rois, np.nan)
+    )
+    for stat in SUITE2P_ROI_STATS:
+        values = try_load_dataset(artifacts.extraction_h5, stat, "rois")
+        columns[stat] = values if values is not None else np.full(num_rois, np.nan)
+    return columns
+
+
+def _add_rois(
+    plane_segmentation: PlaneSegmentation,
+    masks: np.ndarray,
+    columns: Optional[Dict[str, np.ndarray]],
+    extraction_columns: Dict[str, np.ndarray],
+) -> None:
+    """Add every ROI mask (and its optional columns) to a plane segmentation.
+
+    Parameters
+    ----------
+    plane_segmentation : pynwb.ophys.PlaneSegmentation
+        The segmentation table being filled.
+    masks : numpy.ndarray
+        Dense per-ROI masks of shape ``(n_rois, height, width)``.
+    columns : dict of str to numpy.ndarray, or None
+        The classifier's four columns, or ``None`` when unavailable. The two
+        probability columns must be 2-D ``(n_rois, n_classes)``
+        ``predict_proba`` output: the positive class is read as ``[idx][-1]``,
+        so a 1-D array passes the ROI-count check and then indexes the wrong
+        axis.
+    extraction_columns : dict of str to numpy.ndarray
+        The extraction-derived columns, always present.
+    """
+    for idx, mask in enumerate(masks):
+        row = {name: extraction_columns[name][idx] for name, _ in EXTRACTION_COLUMN_SPECS}
+        if columns is not None:
+            row.update(
+                {
+                    "is_soma": columns["is_soma"][idx],
+                    "soma_probability": columns["soma_probability"][idx][-1],
+                    "is_dendrite": columns["is_dendrite"][idx],
+                    "dendrite_probability": columns["dendrite_probability"][idx][-1],
+                }
+            )
+        plane_segmentation.add_roi(image_mask=mask, **row)
+
+
+def _add_neuropil_segmentation(
+    extraction_h5: Path,
+    img_seg: ImageSegmentation,
+    imaging_plane: ImagingPlane,
+    resolution: Optional[float],
+) -> Optional[GrayscaleImage]:
+    """Add the neuropil segmentation table and return its label image.
+
+    Parameters
+    ----------
+    extraction_h5 : Path
+        Path to ``<plane>_extraction.h5``.
+    img_seg : ImageSegmentation
+        The segmentation container to add the table to.
+    imaging_plane : ImagingPlane
+        The plane the table belongs to.
+    resolution : float or None
+        Pixel resolution recorded on the returned image; ``None`` when unknown.
+
+    Returns
+    -------
+    GrayscaleImage or None
+        The collapsed neuropil label image, or ``None`` when the extraction
+        file carries no neuropil masks.
+    """
+    try:
+        masks, r_values = load_neuropil_masks_and_r_values(extraction_h5)
+    except (KeyError, OSError) as exc:
+        logger.warning(
+            "No neuropil masks in %s (%s); the neuropil_table is omitted.",
+            extraction_h5,
+            exc,
+        )
+        return None
+    table = img_seg.create_plane_segmentation(
+        name="neuropil_table",
+        description="Neuropil segmentation masks from suite2p",
+        imaging_plane=imaging_plane,
+    )
+    for mask in masks:
+        table.add_roi(image_mask=mask)
+    table.add_column(
+        name="neuropil_r_value",
+        description="Coefficients used for neuropil correction",
+        data=r_values,
+    )
+    return GrayscaleImage(
+        name="neuropil_mask_image",
+        data=collapse_masks_to_label_image(masks),
+        resolution=resolution,
+        description="Neuropil segmentation mask image",
+    )
+
+
+def _as_grayscale(image: np.ndarray, path: Path) -> np.ndarray:
+    """Reduce a decoded PNG to the 2-D array ``GrayscaleImage`` requires.
+
+    A multi-channel image is reduced to its first channel, with a warning.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        The decoded image.
+    path : Path
+        Source path, for the warning message.
+
+    Returns
+    -------
+    numpy.ndarray
+        A 2-D array.
+    """
+    if image.ndim == 2:
+        return image
+    logger.warning(
+        "%s decoded to shape %s, expected 2-D; using the first channel.",
+        path,
+        image.shape,
+    )
+    return image[..., 0]
+
+
+def _summary_images(
+    artifacts: PlaneArtifacts,
+    approach: SegmentationApproach,
+    resolution: Optional[float],
+    neuropil_image: Optional[GrayscaleImage],
+) -> list:
+    """Build the summary GrayscaleImages for one plane.
+
+    Parameters
+    ----------
+    artifacts : PlaneArtifacts
+        Resolved upstream artifacts for this plane.
+    approach : SegmentationApproach
+        How the ROIs were segmented; selects the segmentation-mask source.
+    resolution : float or None
+        Pixel resolution recorded on every image; ``None`` when unknown.
+    neuropil_image : GrayscaleImage or None
+        The neuropil label image, appended when present.
+
+    Returns
+    -------
+    list of GrayscaleImage
+        The images to place in the plane's ``images`` container.
+    """
+    images = []
+    for name, path, description in (
+        (
+            "average_projection",
+            artifacts.average_projection_png,
+            "Average intensity projection of entire session",
+        ),
+        (
+            "max_projection",
+            artifacts.maximum_projection_png,
+            "Max intensity projection of entire session",
+        ),
+    ):
+        if path is None:
+            logger.warning("No %s for %s; omitted.", name, artifacts.plane_id)
+            continue
+        images.append(
+            GrayscaleImage(
+                name=name,
+                data=_as_grayscale(plt.imread(path), path),
+                resolution=resolution,
+                description=description,
+            )
+        )
+
+    if approach is SegmentationApproach.SUITE2P_ANATOMICAL:
+        mask = try_load_dataset(artifacts.extraction_h5, "masks", "cellpose")
+    else:
+        mask = collapse_masks_to_label_image(load_roi_masks(artifacts.extraction_h5))
+    if mask is not None:
+        images.append(
+            GrayscaleImage(
+                name="segmentation_mask_image",
+                data=mask,
+                resolution=resolution,
+                description="Segmentation projection of entire session",
+            )
+        )
+    if neuropil_image is not None:
+        images.append(neuropil_image)
+    return images
+
+
+def write_nwb_zarr(nwbfile: NWBFile, path: Path) -> Path:
+    """Write the NWB file to a Zarr store.
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        The completed file.
+    path : Path
+        Destination ``*.nwb.zarr`` directory.
+
+    Returns
+    -------
+    Path
+        The path written.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NWBZarrIO(str(path), "w") as io:
+        io.write(nwbfile)
+    return path
+
+
+def read_nwb_zarr(path: Path) -> Tuple[str, ...]:
+    """Re-open a written Zarr store and return its processing-module names.
+
+    Parameters
+    ----------
+    path : Path
+        The ``*.nwb.zarr`` directory to read.
+
+    Returns
+    -------
+    tuple of str
+        The processing-module (plane) names found in the file.
+    """
+    with NWBZarrIO(str(path), "r") as io:
+        return tuple(io.read().processing.keys())
 
 
 def nwb_ophys_single_plane(
