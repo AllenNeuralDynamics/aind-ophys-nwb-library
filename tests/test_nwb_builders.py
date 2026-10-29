@@ -4,15 +4,18 @@ import logging
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import h5py
 import imageio.v3 as iio
 import numpy as np
+from pynwb import NWBFile
 
 from aind_ophys_nwb_library import nwb_builders as nb
 from aind_ophys_nwb_library.file_handling import PlaneArtifacts
+from aind_ophys_nwb_library.utils.metadata_utils import NwbMetadata
 
 # Production shapes, scaled down only in the frame count: masks and
 # projections are full field of view, traces are (n_rois, n_frames).
@@ -172,6 +175,71 @@ def write_projection(path: Path, rgba: bool = False) -> Path:
     shape = (HEIGHT, WIDTH, 4) if rgba else (HEIGHT, WIDTH)
     iio.imwrite(path, np.zeros(shape, dtype="uint8"))
     return path
+
+
+def plane_metadata(
+    plane_id: str = PLANE_ID,
+    index: int = 0,
+    coupled: Optional[int] = 0,
+) -> Dict[str, Any]:
+    """Return one plane's imaging metadata record.
+
+    Parameters
+    ----------
+    plane_id : str, optional
+        Canonical plane id.
+    index : int, optional
+        Plane index.
+    coupled : int, optional
+        Coupled-pair index (``plane_group``); ``None`` for metadata that
+        omits the coupling.
+
+    Returns
+    -------
+    dict
+        The plane record, in the shape ``load_nwb_metadata`` produces.
+    """
+    return {
+        "plane_id": plane_id,
+        "plane_index": index,
+        "structure": plane_id.split("_")[0],
+        "depth": 150.0 + 50 * index,
+        "depth_unit": "micrometer",
+        "coupled_plane_index": coupled,
+        "plane_group": coupled,
+        "scale_factor": SCALE_FACTOR,
+        "scale_factor_unit": "micrometer",
+        "um_per_pixel": SCALE_FACTOR,
+        "width": WIDTH,
+        "height": HEIGHT,
+    }
+
+
+def nwb_metadata(core_file: Path, planes: Sequence[Dict[str, Any]]) -> NwbMetadata:
+    """Return the acquisition metadata the builders consume.
+
+    Parameters
+    ----------
+    core_file : Path
+        Path recorded as the source core metadata file.
+    planes : sequence of dict
+        Planes in acquisition order.
+
+    Returns
+    -------
+    NwbMetadata
+        The acquisition record.
+    """
+    return NwbMetadata(
+        schema_version="2.0",
+        core_file=core_file,
+        planes=tuple(planes),
+        frame_rate=FRAME_RATE,
+        instrument_id="MESO.1",
+        excitation_wavelength=920.0,
+        emission_wavelength=520.0,
+        indicator="GCaMP6f",
+    )
 
 
 class ExtractionFileCase(unittest.TestCase):
@@ -363,6 +431,333 @@ class TestRoiTableColumns(ExtractionFileCase):
             with self.subTest(column=name):
                 self.assertEqual(values.shape, (N_ROIS,))
                 self.assertTrue(np.isnan(values).all())
+
+
+class TestSeriesTiming(unittest.TestCase):
+    """Timing kwargs and the grayscale reduction."""
+
+    def test_timestamps_win_when_present(self) -> None:
+        """A multiplane plane carries its own sync timestamps."""
+        timestamps = np.arange(N_FRAMES, dtype=float) / FRAME_RATE
+        kwargs = nb._series_kwargs(timestamps, FRAME_RATE)
+        np.testing.assert_array_equal(kwargs["timestamps"], timestamps)
+        self.assertNotIn("rate", kwargs)
+
+    def test_frame_rate_fallback_without_a_sync_file(self) -> None:
+        """Single-plane sessions have no sync file, so a rate is recorded."""
+        kwargs = nb._series_kwargs(None, FRAME_RATE)
+        self.assertEqual(kwargs, {"rate": FRAME_RATE, "starting_time": 0.0})
+
+    def test_two_dimensional_image_passes_through(self) -> None:
+        """Motion correction writes 2-D uint8, which needs no reduction."""
+        image = np.zeros((HEIGHT, WIDTH), dtype="uint8")
+        self.assertIs(nb._as_grayscale(image, Path("projection.png")), image)
+
+    def test_colour_image_is_collapsed_with_a_warning(self) -> None:
+        """A colour-mapped PNG would abort GrayscaleImage construction."""
+        image = np.zeros((HEIGHT, WIDTH, 4), dtype="uint8")
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            reduced = nb._as_grayscale(image, Path("projection.png"))
+        self.assertEqual(reduced.shape, (HEIGHT, WIDTH))
+
+
+class TestInstrumentDescription(unittest.TestCase):
+    """The microscope description from the v1 rig id or the v2 instrument id."""
+
+    def test_mesoscope_ids_from_either_version(self) -> None:
+        """v2 names the mesoscope by its dated instrument id."""
+        for instrument_id in ("MESO.1", "MESO.2", "422_MESO2_20260122"):
+            with self.subTest(instrument_id=instrument_id):
+                self.assertEqual(nb.instrument_description(instrument_id), nb.MESOSCOPE_DESCRIPTION)
+
+    def test_other_rigs_are_named(self) -> None:
+        """A non-mesoscope rig keeps its id in the description."""
+        self.assertEqual(
+            nb.instrument_description("442_Bergamo_2p_photostim"),
+            "AIND 2P rig 442_Bergamo_2p_photostim",
+        )
+        self.assertEqual(nb.instrument_description(None), "Unknown 2P rig")
+
+
+class TestSyncTimestampsPerPlane(unittest.TestCase):
+    """The multiplane vsync edge train split into per-plane timestamps."""
+
+    def test_coupled_pairs_are_decimated_and_offset(self) -> None:
+        """Four planes are two temporal groups, so every second edge."""
+        planes = [
+            plane_metadata("VISp_0", 0, 0),
+            plane_metadata("VISl_1", 1, 0),
+            plane_metadata("VISal_2", 2, 1),
+            plane_metadata("VISam_3", 3, 1),
+        ]
+        edges = np.arange(N_FRAMES, dtype=float) / FRAME_RATE
+        per_plane = nb.sync_timestamps_per_plane(planes, edges)
+        self.assertEqual(set(per_plane), {plane["plane_id"] for plane in planes})
+        np.testing.assert_array_equal(per_plane["VISp_0"], edges[0::2])
+        np.testing.assert_array_equal(per_plane["VISal_2"], edges[1::2])
+        self.assertEqual(len(per_plane["VISl_1"]), N_FRAMES // 2)
+
+    def test_odd_plane_count_raises(self) -> None:
+        """Coupled-pair assignment needs an even number of planes."""
+        with self.assertRaises(ValueError) as ctx:
+            nb.sync_timestamps_per_plane([plane_metadata()], np.arange(10, dtype=float))
+        self.assertIn("1 planes", str(ctx.exception))
+
+    def test_coupled_index_disagreeing_with_position_raises(self) -> None:
+        """Mis-timestamping every trace is worse than failing the run."""
+        planes = [plane_metadata("VISp_0", 0, 0), plane_metadata("VISl_1", 1, 3)]
+        with self.assertRaises(ValueError) as ctx:
+            nb.sync_timestamps_per_plane(planes, np.arange(10, dtype=float))
+        self.assertIn("pair 3", str(ctx.exception))
+
+    def test_unset_coupled_index_is_accepted(self) -> None:
+        """v1 metadata can omit the coupled index entirely."""
+        planes = [
+            plane_metadata("plane_0", 0, coupled=None),
+            plane_metadata("plane_1", 1, coupled=None),
+        ]
+        per_plane = nb.sync_timestamps_per_plane(planes, np.arange(10, dtype=float))
+        self.assertEqual(len(per_plane), 2)
+
+
+class TestAddPlane(ExtractionFileCase):
+    """One plane packaged end to end from real upstream payloads."""
+
+    def setUp(self) -> None:
+        """Add an empty NWBFile, its device and its optical channel."""
+        super().setUp()
+        self.plane = plane_metadata()
+        self.metadata = nwb_metadata(self.root / "acquisition.json", [self.plane])
+        self.nwbfile = NWBFile(
+            session_description="test",
+            identifier="test",
+            session_start_time=datetime.now(timezone.utc),
+        )
+        self.device, self.optical_channel = nb.create_microscope(self.nwbfile, self.metadata)
+
+    def add(
+        self,
+        artifacts: Optional[PlaneArtifacts] = None,
+        timestamps: Optional[np.ndarray] = None,
+    ) -> Tuple[Dict[str, bool], int]:
+        """Add this plane and return the builder's result.
+
+        Parameters
+        ----------
+        artifacts : PlaneArtifacts, optional
+            Artifacts to package; the complete set by default.
+        timestamps : numpy.ndarray, optional
+            Per-plane sync timestamps; omitted for a single-plane session.
+
+        Returns
+        -------
+        tuple of (dict, int)
+            Which containers were written, and the ROI count.
+        """
+        return nb.add_plane(
+            self.nwbfile,
+            self.metadata,
+            self.plane,
+            artifacts if artifacts is not None else self.artifacts(),
+            self.device,
+            self.optical_channel,
+            timestamps=timestamps,
+        )
+
+    def test_complete_plane_writes_every_container(self) -> None:
+        """A full upstream set yields all traces, images and columns."""
+        contents, num_rois = self.add()
+        self.assertEqual(num_rois, N_ROIS)
+        self.assertTrue(all(contents[name] for name in contents))
+        module = self.nwbfile.processing[PLANE_ID]
+        self.assertEqual(
+            set(module.data_interfaces),
+            {
+                "raw",
+                "neuropil_fluorescence",
+                "neuropil_corrected",
+                "dff",
+                "event",
+                "image_segmentation",
+                "images",
+            },
+        )
+
+    def test_roi_table_description_names_the_segmentation(self) -> None:
+        """The description separates the method from its description."""
+        self.add()
+        segmentation = self.nwbfile.processing[PLANE_ID]["image_segmentation"]
+        approach = nb.SegmentationApproach.SUITE2P_ACTIVITY.value
+        self.assertEqual(
+            segmentation.plane_segmentations["roi_table"].description,
+            f"{approach['method']}: {approach['description']}",
+        )
+
+    def test_traces_are_written_time_major(self) -> None:
+        """RoiResponseSeries data is (n_frames, n_rois), the transpose."""
+        self.add()
+        series = self.nwbfile.processing[PLANE_ID]["neuropil_fluorescence"]
+        self.assertEqual(series.data.shape, (N_FRAMES, N_ROIS))
+
+    def test_single_plane_records_a_rate(self) -> None:
+        """Without sync timestamps the acquisition frame rate is recorded."""
+        self.add()
+        series = self.nwbfile.processing[PLANE_ID]["neuropil_fluorescence"]
+        self.assertEqual(series.rate, FRAME_RATE)
+
+    def test_multiplane_names_are_suffixed_and_timestamped(self) -> None:
+        """Sync timestamps select the v1 ``_timeseries`` container names."""
+        timestamps = np.arange(N_FRAMES, dtype=float) / FRAME_RATE
+        self.add(timestamps=timestamps)
+        module = self.nwbfile.processing[PLANE_ID]
+        series = module["neuropil_fluorescence_timeseries"]
+        np.testing.assert_array_equal(series.timestamps, timestamps)
+
+    def test_longer_timestamp_vector_is_trimmed_to_the_traces(self) -> None:
+        """A debug-truncated movie leaves the sync record longer.
+
+        The trace length is authoritative and every upstream cap is a head
+        slice, so the head of the timestamp vector is the matching window. The
+        comparison is a length check on two arrays, never a truthiness test.
+        """
+        timestamps = np.arange(N_FRAMES + 500, dtype=float) / FRAME_RATE
+        with self.assertLogs(nb.logger, level=logging.WARNING) as logs:
+            self.add(timestamps=timestamps)
+        series = self.nwbfile.processing[PLANE_ID]["neuropil_fluorescence_timeseries"]
+        self.assertEqual(len(series.timestamps), N_FRAMES)
+        np.testing.assert_array_equal(series.timestamps, timestamps[:N_FRAMES])
+        self.assertIn("trimming timestamps", logs.output[0])
+
+    def test_trace_roi_count_mismatch_raises(self) -> None:
+        """Traces and masks pair positionally, so a mismatch must not pass."""
+        wrong = write_single_dataset(
+            self.root / "wrong_dff.h5",
+            "data",
+            np.zeros((N_ROIS + 2, N_FRAMES), dtype="float32"),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.add(self.artifacts(dff_h5=wrong))
+        self.assertIn("ROI masks", str(ctx.exception))
+
+    def test_missing_traces_group_raises(self) -> None:
+        """Without traces/roi the plane has no timeseries to package."""
+        bare = self.root / "no_traces_extraction.h5"
+        coords = np.array(np.nonzero(self.masks))
+        with h5py.File(bare, "w") as handle:
+            rois = handle.create_group("rois")
+            rois["data"] = np.ones(coords.shape[1], dtype=bool)
+            rois["coords"] = coords
+            rois["shape"] = np.array(self.masks.shape)
+        with self.assertRaises(KeyError):
+            self.add(self.artifacts(extraction_h5=bare))
+
+    def test_optional_artifacts_absent_still_packages(self) -> None:
+        """A skipped dF/F, OASIS or classifier degrades one container each."""
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            contents, num_rois = self.add(
+                self.artifacts(dff_h5=None, events_oasis_h5=None, classification_h5=None)
+            )
+        self.assertEqual(num_rois, N_ROIS)
+        self.assertTrue(contents["roi_fluorescence"])
+        self.assertFalse(contents["dff"])
+        self.assertFalse(contents["events"])
+        self.assertFalse(contents["classification"])
+
+    def test_absent_projections_are_reported_from_the_paths(self) -> None:
+        """``projections`` must not be derived from the image list, which
+        also holds the segmentation and neuropil mask images."""
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            contents, _ = self.add(
+                self.artifacts(average_projection_png=None, maximum_projection_png=None)
+            )
+        self.assertFalse(contents["projections"])
+        self.assertIn("images", self.nwbfile.processing[PLANE_ID].data_interfaces)
+
+    def test_anatomical_mode_uses_the_cellpose_mask_image(self) -> None:
+        """The segmentation image source follows the segmentation approach."""
+        anatomical = write_extraction(
+            self.root / "cellpose_extraction.h5", self.masks, cellpose=True
+        )
+        self.add(self.artifacts(extraction_h5=anatomical))
+        images = self.nwbfile.processing[PLANE_ID]["images"]
+        self.assertIn("segmentation_mask_image", images.images)
+
+    def test_geometry_is_the_pixel_size_in_micrometres(self) -> None:
+        """grid_spacing and image resolution come from um_per_pixel.
+
+        A v2 scale is in the acquisition's coordinate-system unit (millimetres
+        for the mesoscope), so the raw scale factor must not be written.
+        """
+        self.plane = {
+            **plane_metadata(),
+            "scale_factor": SCALE_FACTOR / 1000,
+            "scale_factor_unit": "millimeter",
+        }
+        self.add()
+        imaging_plane = self.nwbfile.imaging_planes[PLANE_ID]
+        self.assertEqual(list(imaging_plane.grid_spacing), [SCALE_FACTOR, SCALE_FACTOR])
+        self.assertEqual(imaging_plane.grid_spacing_unit, "micrometer")
+        images = self.nwbfile.processing[PLANE_ID]["images"]
+        self.assertEqual(images["average_projection"].resolution, SCALE_FACTOR)
+
+    def test_unknown_pixel_size_omits_the_geometry(self) -> None:
+        """No pixel size is written as absent, never as 1.0."""
+        self.plane = {**plane_metadata(), "um_per_pixel": None}
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            self.add()
+        self.assertIsNone(self.nwbfile.imaging_planes[PLANE_ID].grid_spacing)
+        images = self.nwbfile.processing[PLANE_ID]["images"]
+        self.assertIsNone(images["average_projection"].resolution)
+
+    def test_zero_roi_plane_packages_without_argmax_failing(self) -> None:
+        """A plane can legitimately have no ROIs at all, and still writes."""
+        empty_masks = roi_masks(0)
+        extraction = write_extraction(self.root / "zero_extraction.h5", empty_masks)
+        contents, num_rois = self.add(
+            self.artifacts(
+                extraction_h5=extraction,
+                dff_h5=write_single_dataset(
+                    self.root / "zero_dff.h5", "data", np.zeros((0, N_FRAMES), dtype="float32")
+                ),
+                events_oasis_h5=None,
+                classification_h5=write_classification(
+                    self.root / "zero_classification.h5", n_rois=0
+                ),
+            )
+        )
+        self.assertEqual(num_rois, 0)
+        self.assertTrue(contents["dff"])
+        path = nb.write_nwb_zarr(self.nwbfile, self.root / "out" / "zero.nwb.zarr")
+        self.assertEqual(nb.read_nwb_zarr(path), (PLANE_ID,))
+
+    def test_neuropil_masks_absent_omits_the_table(self) -> None:
+        """An extraction file without neuropil masks still packages."""
+        extraction = write_extraction(
+            self.root / "no_neuropil_extraction.h5", self.masks, with_neuropil_masks=False
+        )
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            self.add(self.artifacts(extraction_h5=extraction))
+        segmentation = self.nwbfile.processing[PLANE_ID]["image_segmentation"]
+        self.assertNotIn("neuropil_table", segmentation.plane_segmentations)
+
+
+class TestZarrRoundTrip(ExtractionFileCase):
+    """The written store must re-open and report its planes."""
+
+    def test_write_and_read_back(self) -> None:
+        """The written store re-opens with its plane module."""
+        plane = plane_metadata()
+        metadata = nwb_metadata(self.root / "acquisition.json", [plane])
+        nwbfile = NWBFile(
+            session_description="test",
+            identifier="test",
+            session_start_time=datetime.now(timezone.utc),
+        )
+        device, optical_channel = nb.create_microscope(nwbfile, metadata)
+        nb.add_plane(nwbfile, metadata, plane, self.artifacts(), device, optical_channel)
+        path = nb.write_nwb_zarr(nwbfile, self.root / "out" / "pophys.nwb.zarr")
+        self.assertTrue(path.exists())
+        self.assertEqual(nb.read_nwb_zarr(path), (PLANE_ID,))
 
 
 if __name__ == "__main__":
