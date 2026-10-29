@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aind_data_schema.components.identifiers import Code, DataAsset
-from aind_pophys_metadata import CoreMetadata, find_one, io
+from aind_pophys_metadata import CoreMetadata, SchemaVersion, find_one, io
 from aind_pophys_metadata import processing as shared_processing
 
 
@@ -20,6 +20,10 @@ PROCEDURES_FILE = "procedures.json"
 
 #: Key added to each shared plane record, pairing it with its canonical id.
 PLANE_ID_KEY = "plane_id"
+
+#: Key added to each shared plane record: the index of the plane's coupled
+#: pair (its temporal group), or ``None`` when the metadata records no pairing.
+PLANE_GROUP_KEY = "plane_group"
 
 #: ``DataProcess.name``. Set explicitly because the converter also uses
 #: ``ProcessName.FILE_FORMAT_CONVERSION``, so both would otherwise derive the
@@ -62,8 +66,8 @@ def plane_location(plane: Dict[str, Any]) -> str:
 class NwbMetadata:
     """Minimal metadata the NWB packaging step consumes.
 
-    Each entry of ``planes`` is a shared plane record with an added
-    ``plane_id`` key, ordered by ``plane_index``.
+    Each entry of ``planes`` is a shared plane record with added ``plane_id``
+    and ``plane_group`` keys, ordered by ``plane_index``.
     """
 
     schema_version: str
@@ -178,6 +182,50 @@ def session_type(plane_count: int, has_epochs: bool) -> SessionType:
     return SessionType.SINGLE_PLANE_WITH_EPOCHS if has_epochs else SessionType.SINGLE_PLANE
 
 
+def plane_groups(records: List[Dict[str, Any]], version: SchemaVersion) -> List[Optional[int]]:
+    """Return each plane's coupled-pair index, whichever way the metadata records it.
+
+    v1 and minimal documents record the pair index itself as
+    ``coupled_plane_index``. v2 records the partner plane's ``plane_index``, so
+    pairs are numbered in plane-index order.
+
+    Parameters
+    ----------
+    records : list of dict
+        Shared plane records, ordered by ``plane_index``.
+    version : aind_pophys_metadata.SchemaVersion
+        Schema version of the document the records came from.
+
+    Returns
+    -------
+    list of int or None
+        One pair index per record; ``None`` where no coupling is recorded.
+
+    Raises
+    ------
+    ValueError
+        If a v2 plane's partner is missing or does not name the plane back.
+    """
+    coupled = [record["coupled_plane_index"] for record in records]
+    if version is not SchemaVersion.V2:
+        return coupled
+    position_of = {record["plane_index"]: i for i, record in enumerate(records)}
+    groups: List[Optional[int]] = [None] * len(records)
+    next_group = 0
+    for i, record in enumerate(records):
+        if coupled[i] is None or groups[i] is not None:
+            continue
+        j = position_of.get(coupled[i])
+        if j is None or j == i or coupled[j] != record["plane_index"]:
+            raise ValueError(
+                f"Plane index {record['plane_index']} declares coupled plane "
+                f"{coupled[i]}, which is missing or not coupled back to it."
+            )
+        groups[i] = groups[j] = next_group
+        next_group += 1
+    return groups
+
+
 def identified_planes(core: CoreMetadata) -> Tuple[Dict[str, Any], ...]:
     """Order the shared plane records and pair each with its canonical id.
 
@@ -190,12 +238,13 @@ def identified_planes(core: CoreMetadata) -> Tuple[Dict[str, Any], ...]:
     -------
     tuple of dict
         One record per plane, ordered by ``plane_index`` and each carrying an
-        added ``plane_id``.
+        added ``plane_id`` and ``plane_group``.
     """
     records = sorted(core.get_plane_records(), key=lambda record: record["plane_index"])
+    groups = plane_groups(records, core.version)
     return tuple(
-        {**record, PLANE_ID_KEY: plane_id}
-        for record, plane_id in zip(records, core.get_fov_ids(), strict=True)
+        {**record, PLANE_ID_KEY: plane_id, PLANE_GROUP_KEY: group}
+        for record, plane_id, group in zip(records, core.get_fov_ids(), groups, strict=True)
     )
 
 
