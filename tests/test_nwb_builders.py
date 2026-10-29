@@ -191,7 +191,8 @@ def plane_metadata(
     index : int, optional
         Plane index.
     coupled : int, optional
-        Temporal group index; ``None`` for metadata that omits it.
+        Coupled-pair index (``plane_group``); ``None`` for metadata that
+        omits the coupling.
 
     Returns
     -------
@@ -205,6 +206,7 @@ def plane_metadata(
         "depth": 150.0 + 50 * index,
         "depth_unit": "micrometer",
         "coupled_plane_index": coupled,
+        "plane_group": coupled,
         "scale_factor": SCALE_FACTOR,
         "scale_factor_unit": "micrometer",
         "um_per_pixel": SCALE_FACTOR,
@@ -459,6 +461,24 @@ class TestSeriesTiming(unittest.TestCase):
         self.assertEqual(reduced.shape, (HEIGHT, WIDTH))
 
 
+class TestInstrumentDescription(unittest.TestCase):
+    """The microscope description from the v1 rig id or the v2 instrument id."""
+
+    def test_mesoscope_ids_from_either_version(self) -> None:
+        """v2 names the mesoscope by its dated instrument id."""
+        for instrument_id in ("MESO.1", "MESO.2", "422_MESO2_20260122"):
+            with self.subTest(instrument_id=instrument_id):
+                self.assertEqual(nb.instrument_description(instrument_id), nb.MESOSCOPE_DESCRIPTION)
+
+    def test_other_rigs_are_named(self) -> None:
+        """A non-mesoscope rig keeps its id in the description."""
+        self.assertEqual(
+            nb.instrument_description("442_Bergamo_2p_photostim"),
+            "AIND 2P rig 442_Bergamo_2p_photostim",
+        )
+        self.assertEqual(nb.instrument_description(None), "Unknown 2P rig")
+
+
 class TestSyncTimestampsPerPlane(unittest.TestCase):
     """The multiplane vsync edge train split into per-plane timestamps."""
 
@@ -488,7 +508,7 @@ class TestSyncTimestampsPerPlane(unittest.TestCase):
         planes = [plane_metadata("VISp_0", 0, 0), plane_metadata("VISl_1", 1, 3)]
         with self.assertRaises(ValueError) as ctx:
             nb.sync_timestamps_per_plane(planes, np.arange(10, dtype=float))
-        self.assertIn("coupled index 3", str(ctx.exception))
+        self.assertIn("pair 3", str(ctx.exception))
 
     def test_unset_coupled_index_is_accepted(self) -> None:
         """v1 metadata can omit the coupled index entirely."""
@@ -662,8 +682,35 @@ class TestAddPlane(ExtractionFileCase):
         images = self.nwbfile.processing[PLANE_ID]["images"]
         self.assertIn("segmentation_mask_image", images.images)
 
+    def test_geometry_is_the_pixel_size_in_micrometres(self) -> None:
+        """grid_spacing and image resolution come from um_per_pixel.
+
+        A v2 scale is in the acquisition's coordinate-system unit (millimetres
+        for the mesoscope), so the raw scale factor must not be written.
+        """
+        self.plane = {
+            **plane_metadata(),
+            "scale_factor": SCALE_FACTOR / 1000,
+            "scale_factor_unit": "millimeter",
+        }
+        self.add()
+        imaging_plane = self.nwbfile.imaging_planes[PLANE_ID]
+        self.assertEqual(list(imaging_plane.grid_spacing), [SCALE_FACTOR, SCALE_FACTOR])
+        self.assertEqual(imaging_plane.grid_spacing_unit, "micrometer")
+        images = self.nwbfile.processing[PLANE_ID]["images"]
+        self.assertEqual(images["average_projection"].resolution, SCALE_FACTOR)
+
+    def test_unknown_pixel_size_omits_the_geometry(self) -> None:
+        """No pixel size is written as absent, never as 1.0."""
+        self.plane = {**plane_metadata(), "um_per_pixel": None}
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            self.add()
+        self.assertIsNone(self.nwbfile.imaging_planes[PLANE_ID].grid_spacing)
+        images = self.nwbfile.processing[PLANE_ID]["images"]
+        self.assertIsNone(images["average_projection"].resolution)
+
     def test_zero_roi_plane_packages_without_argmax_failing(self) -> None:
-        """A plane can legitimately have no ROIs at all."""
+        """A plane can legitimately have no ROIs at all, and still writes."""
         empty_masks = roi_masks(0)
         extraction = write_extraction(self.root / "zero_extraction.h5", empty_masks)
         contents, num_rois = self.add(
@@ -680,6 +727,8 @@ class TestAddPlane(ExtractionFileCase):
         )
         self.assertEqual(num_rois, 0)
         self.assertTrue(contents["dff"])
+        path = nb.write_nwb_zarr(self.nwbfile, self.root / "out" / "zero.nwb.zarr")
+        self.assertEqual(nb.read_nwb_zarr(path), (PLANE_ID,))
 
     def test_neuropil_masks_absent_omits_the_table(self) -> None:
         """An extraction file without neuropil masks still packages."""

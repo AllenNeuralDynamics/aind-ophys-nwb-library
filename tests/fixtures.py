@@ -13,6 +13,7 @@ INJECTION_MATERIAL = "AAV-GCaMP6f"
 EXCITATION_NM = 920
 EMISSION_NM = 520
 SCALE_UM_PER_PX = 0.78
+SCALE_MM_PER_PX = SCALE_UM_PER_PX / 1000
 FOV_WIDTH = 512
 FOV_HEIGHT = 512
 STRUCTURES = ("VISp", "VISl")
@@ -97,7 +98,7 @@ def v1_session_without_planes() -> dict:
     return session
 
 
-def _v2_plane(index: int, structure: str, coupled_index: int) -> dict:
+def _v2_plane(index: int, structure: str, coupled_index: Optional[int]) -> dict:
     """Return one minimal v2 ``CoupledPlane`` dict.
 
     Parameters
@@ -106,8 +107,8 @@ def _v2_plane(index: int, structure: str, coupled_index: int) -> dict:
         Plane index.
     structure : str
         Targeted-structure acronym.
-    coupled_index : int
-        Temporal group index (``coupled_plane_index``).
+    coupled_index : int or None
+        The partner plane's index (``coupled_plane_index``).
 
     Returns
     -------
@@ -127,7 +128,11 @@ def _v2_plane(index: int, structure: str, coupled_index: int) -> dict:
 
 
 def v2_acquisition(plane_count: int = 2, subject_id: Optional[str] = SUBJECT_ID) -> dict:
-    """Return a minimal v2 ``acquisition.json`` dict.
+    """Return a minimal v2 ``acquisition.json`` dict, shaped as the mesoscope mapper writes it.
+
+    Each plane names its partner, ``index ^ 1``, as its coupled plane. The scale
+    is in the acquisition's millimetre coordinate system; ``dimensions_unit``
+    is the unit of the pixel dimensions.
 
     Parameters
     ----------
@@ -150,11 +155,14 @@ def v2_acquisition(plane_count: int = 2, subject_id: Optional[str] = SUBJECT_ID)
     from aind_data_schema.components.coordinates import Scale
 
     planes = [
-        _v2_plane(index, STRUCTURES[index % len(STRUCTURES)], index // 2)
+        _v2_plane(
+            index, STRUCTURES[index % len(STRUCTURES)], index ^ 1 if plane_count > 1 else None
+        )
         for index in range(plane_count)
     ]
     acquisition = {
         "instrument_id": INSTRUMENT_ID,
+        "coordinate_system": {"axis_unit": "millimeter"},
         "data_streams": [
             {
                 "configurations": [
@@ -179,7 +187,7 @@ def v2_acquisition(plane_count: int = 2, subject_id: Optional[str] = SUBJECT_ID)
                             {
                                 "object_type": object_type_value(PlanarImage),
                                 "channel_name": "green",
-                                "dimensions_unit": "micrometer",
+                                "dimensions_unit": "pixel",
                                 "dimensions": {
                                     "object_type": object_type_value(Scale),
                                     "scale": [FOV_WIDTH, FOV_HEIGHT],
@@ -187,7 +195,7 @@ def v2_acquisition(plane_count: int = 2, subject_id: Optional[str] = SUBJECT_ID)
                                 "image_to_acquisition_transform": [
                                     {
                                         "object_type": object_type_value(Scale),
-                                        "scale": [SCALE_UM_PER_PX, SCALE_UM_PER_PX],
+                                        "scale": [SCALE_MM_PER_PX, SCALE_MM_PER_PX],
                                     }
                                 ],
                                 "planes": planes,

@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Optional, Sequence
 from unittest.mock import patch
 
+import numpy as np
 from aind_data_schema.core.processing import Processing
 from aind_data_schema_models.process_names import ProcessName
+from aind_pophys_metadata import SchemaVersion
 from aind_pophys_metadata.runner import stage_guard
 
+from aind_ophys_nwb_library import nwb_builders as nb
 from aind_ophys_nwb_library.utils import metadata_utils as mu
 from tests import fixtures
 
@@ -71,9 +74,8 @@ class TestPlaneFields(unittest.TestCase):
         self.assertEqual(first["structure"], "VISp")
         self.assertEqual(first["depth"], 150.0)
         self.assertEqual(first["depth_unit"], "micrometer")
-        self.assertEqual(first["coupled_plane_index"], 0)
-        self.assertEqual(first["scale_factor"], fixtures.SCALE_UM_PER_PX)
-        self.assertEqual(first["scale_factor_unit"], "micrometer")
+        self.assertEqual([plane[mu.PLANE_GROUP_KEY] for plane in planes], [0, 0])
+        self.assertAlmostEqual(first["um_per_pixel"], fixtures.SCALE_UM_PER_PX)
         self.assertEqual(first["width"], fixtures.FOV_WIDTH)
         self.assertEqual(first["height"], fixtures.FOV_HEIGHT)
 
@@ -91,6 +93,17 @@ class TestPlaneFields(unittest.TestCase):
         self.assertEqual([plane["plane_id"] for plane in planes], ["VISp_0", "VISl_1"])
         self.assertEqual([plane["plane_index"] for plane in planes], [0, 1])
 
+    def test_v2_coupled_pairs_time_together(self) -> None:
+        """Partners in a v2 acquisition share one temporal group's timestamps."""
+        planes = self._planes("acquisition.json", fixtures.v2_acquisition(plane_count=4))
+        edges = np.arange(20, dtype=float)
+        per_plane = nb.sync_timestamps_per_plane(planes, edges)
+        ids = [plane["plane_id"] for plane in planes]
+        np.testing.assert_array_equal(per_plane[ids[0]], edges[0::2])
+        np.testing.assert_array_equal(per_plane[ids[1]], edges[0::2])
+        np.testing.assert_array_equal(per_plane[ids[2]], edges[1::2])
+        np.testing.assert_array_equal(per_plane[ids[3]], edges[1::2])
+
     def test_planes_are_sorted_before_being_paired_with_ids(self) -> None:
         """Records arrive unsorted, so the id pairing must sort first."""
         session = fixtures.v1_session()
@@ -100,6 +113,49 @@ class TestPlaneFields(unittest.TestCase):
             planes = mu.load_nwb_metadata(root).planes
         self.assertEqual([plane["plane_index"] for plane in planes], [0, 1])
         self.assertEqual([plane["plane_id"] for plane in planes], ["VISp_0", "VISl_1"])
+
+
+class TestPlaneGroups(unittest.TestCase):
+    """Coupled-pair indices from either way of recording the coupling."""
+
+    @staticmethod
+    def _records(coupled: list) -> list:
+        """Return plane records, in plane-index order, with these coupled indices."""
+        return [
+            {"plane_index": index, "coupled_plane_index": value}
+            for index, value in enumerate(coupled)
+        ]
+
+    def test_v1_and_minimal_record_the_pair_index(self) -> None:
+        """v1 and minimal documents already carry the pair index."""
+        for schema in (SchemaVersion.V1, SchemaVersion.MINIMAL):
+            with self.subTest(schema=schema):
+                records = self._records([0, 0, 1, 1])
+                self.assertEqual(mu.plane_groups(records, schema), [0, 0, 1, 1])
+
+    def test_v2_partners_are_numbered_in_plane_order(self) -> None:
+        """v2 names each plane's partner, so [1, 0, 3, 2] is pairs 0 and 1."""
+        records = self._records([1, 0, 3, 2, 5, 4, 7, 6])
+        self.assertEqual(
+            mu.plane_groups(records, SchemaVersion.V2), [0, 0, 1, 1, 2, 2, 3, 3]
+        )
+
+    def test_v2_interleaved_partners_keep_their_pairing(self) -> None:
+        """Partners need not be adjacent; the pairing, not the order, decides."""
+        records = self._records([2, 3, 0, 1])
+        self.assertEqual(mu.plane_groups(records, SchemaVersion.V2), [0, 1, 0, 1])
+
+    def test_v2_uncoupled_planes_have_no_group(self) -> None:
+        """A single-plane acquisition records no coupling."""
+        records = self._records([None])
+        self.assertEqual(mu.plane_groups(records, SchemaVersion.V2), [None])
+
+    def test_v2_partner_that_does_not_name_the_plane_back_raises(self) -> None:
+        """A one-sided coupling cannot be timed and fails the run."""
+        for coupled in ([1, 1], [0, 0], [5, 0]):
+            with self.subTest(coupled=coupled):
+                with self.assertRaises(ValueError):
+                    mu.plane_groups(self._records(coupled), SchemaVersion.V2)
 
 
 class TestWavelengths(unittest.TestCase):
