@@ -58,12 +58,6 @@ class SegmentationApproach(Enum):
     }
 
 
-class SessionType(Enum):
-    MULTIPLANE = "multiplane"
-    SINGLE_PLANE_WITH_EPOCHS = "single_plane_with_epochs"
-    SINGLE_PLANE = "single_plane"
-
-
 def load_pynwb_extension(path):
     neurodata_type = "OphysMetadataSchema"
     pynwb.load_namespaces(path)
@@ -1313,31 +1307,6 @@ def find_epoch_locations(processed_path: Path) -> "Path | None":
     return candidates[0] if candidates else None
 
 
-def detect_session_type(
-    data_description: dict, processed_path: Path
-) -> SessionType:
-    """Classify a session based on platform and presence of epoch_locations.
-
-    Parameters
-    ----------
-    data_description : dict
-        Parsed contents of data_description.json.
-    processed_path : Path
-        The processed-data root for the session.
-
-    Returns
-    -------
-    SessionType
-        One of MULTIPLANE, SINGLE_PLANE_WITH_EPOCHS, or SINGLE_PLANE.
-    """
-    platform = data_description.get("platform", {}).get("abbreviation")
-    if platform != "single-plane-ophys":
-        return SessionType.MULTIPLANE
-    if find_epoch_locations(processed_path) is not None:
-        return SessionType.SINGLE_PLANE_WITH_EPOCHS
-    return SessionType.SINGLE_PLANE
-
-
 def sync_times_to_multiplane_fovs(
     ophys_fovs: list, sync_timestamps: np.array
 ) -> list:
@@ -1426,57 +1395,6 @@ def get_processed_file_paths(
     file_paths["processed_path"] = processed_path
     file_paths["raw_path"] = raw_path
     return file_paths
-
-
-def get_metadata(raw_path: Path) -> Tuple[dict, dict, dict]:
-    """Get the metadata from the raw folder
-    Parameters
-    ----------
-    raw_path : Path
-        The path to the raw folder
-    Returns
-    -------
-    Tuple[dict, dict, dict]
-        The session, subject, and rig metadata
-    """
-    rig_json_path = raw_path / "rig.json"
-    if not rig_json_path.is_file():
-        raise FileNotFoundError(
-            f"Rig JSON file not found in the raw folder, {rig_json_path}"
-        )
-    session_json_path = raw_path / "session.json"
-    if not session_json_path.is_file():
-        raise FileNotFoundError(
-            f"Session JSON file not found in the raw folder, \
-              {session_json_path}"
-        )
-    subject_json_path = raw_path / "subject.json"
-    if not subject_json_path.is_file():
-        raise FileNotFoundError(
-            f"Subject JSON file not found in the raw folder,\
-              {subject_json_path}"
-        )
-    procedures_json_path = raw_path / "procedures.json"
-    if not procedures_json_path.is_file():
-        raise FileNotFoundError(
-            f"Procedures JSON file not found in the raw folder,\
-              {procedures_json_path}"
-        )
-
-    with open(rig_json_path) as f:
-        rig_json_data = json.load(f)
-    with open(session_json_path) as f:
-        session_json_data = json.load(f)
-    with open(subject_json_path) as f:
-        subject_json_data = json.load(f)
-    with open(procedures_json_path) as f:
-        procedures_json_data = json.load(f)
-    return (
-        session_json_data,
-        subject_json_data,
-        rig_json_data,
-        procedures_json_data,
-    )
 
 
 def _sync_timestamps(sync_fp: Path) -> np.array:
@@ -1596,68 +1514,6 @@ def add_intervals_sp_nwb(json_path, frame_rate, nwbfile):
     nwbfile.add_time_intervals(trial_table)
 
     return nwbfile
-
-
-def get_ophys_fovs(session: dict) -> list:
-    """Return the ophys_fovs list from whichever data_stream contains it.
-
-    Parameters
-    ----------
-    session : dict
-        Parsed session.json contents.
-
-    Returns
-    -------
-    list
-        The ophys_fovs list, or an empty list if no data_stream has one.
-    """
-    for stream in session.get("data_streams", []):
-        if stream.get("ophys_fovs"):
-            return stream["ophys_fovs"]
-    return []
-
-
-def get_excitation_wavelength(session: dict) -> float:
-    """Return the first light source wavelength found in data_streams.
-
-    Parameters
-    ----------
-    session : dict
-        Parsed session.json contents.
-
-    Returns
-    -------
-    float
-        Wavelength in nm, or NaN if no data_stream has a light_sources entry.
-    """
-    for stream in session.get("data_streams", []):
-        light_sources = stream.get("light_sources")
-        if light_sources:
-            return float(light_sources[0]["wavelength"])
-    return float("nan")
-
-
-def get_frame_rate(session: dict):
-    """Attempt to pull frame rate from session.json
-    Returns none if frame rate not in session.json
-
-    Parameters
-    ----------
-    session: dict
-        session metadata
-
-    Returns
-    -------
-    frame_rate: float
-        frame rate in Hz
-    """
-    fovs = get_ophys_fovs(session)
-    if not fovs:
-        return None
-    frame_rate_hz = fovs[0]["frame_rate"]
-    if isinstance(frame_rate_hz, str):
-        frame_rate_hz = float(frame_rate_hz)
-    return frame_rate_hz
 
 
 if __name__ == "__main__":

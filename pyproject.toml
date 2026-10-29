@@ -19,7 +19,7 @@ version = "0.1.0"
 dependencies = [
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.2.0",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@ba60ba340de7c273d7801d21c4d45fbb9bb7f45f",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
     "aind-nwb-utils==0.2.8",
     "aind-behavior-utils==0.3.4",
@@ -33,6 +33,9 @@ dependencies = [
     "pydantic==2.11.10",
     "pydantic-settings==2.14.2",
 ]
+
+[project.urls]
+Repository = "https://github.com/AllenNeuralDynamics/aind-ophys-nwb-library"
 
 [dependency-groups]
 dev = [
