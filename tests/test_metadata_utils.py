@@ -75,6 +75,7 @@ class TestPlaneFields(unittest.TestCase):
         self.assertEqual(first["depth"], 150.0)
         self.assertEqual(first["depth_unit"], "micrometer")
         self.assertEqual([plane[mu.PLANE_GROUP_KEY] for plane in planes], [0, 0])
+        self.assertAlmostEqual(first["um_per_pixel"], fixtures.SCALE_UM_PER_PX)
         self.assertEqual(first["width"], fixtures.FOV_WIDTH)
         self.assertEqual(first["height"], fixtures.FOV_HEIGHT)
 
