@@ -834,7 +834,7 @@ def add_plane(
     column_defs, colnames = _roi_table_columns(include_classification=columns is not None)
     plane_segmentation = img_seg.create_plane_segmentation(
         name="roi_table",
-        description=approach.value["method"] + approach.value["description"],
+        description=f"{approach.value['method']}: {approach.value['description']}",
         imaging_plane=imaging_plane,
         columns=column_defs,
         colnames=colnames,

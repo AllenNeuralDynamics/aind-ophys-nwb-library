@@ -563,6 +563,16 @@ class TestAddPlane(ExtractionFileCase):
             },
         )
 
+    def test_roi_table_description_names_the_segmentation(self) -> None:
+        """The description separates the method from its description."""
+        self.add()
+        segmentation = self.nwbfile.processing[PLANE_ID]["image_segmentation"]
+        approach = nb.SegmentationApproach.SUITE2P_ACTIVITY.value
+        self.assertEqual(
+            segmentation.plane_segmentations["roi_table"].description,
+            f"{approach['method']}: {approach['description']}",
+        )
+
     def test_traces_are_written_time_major(self) -> None:
         """RoiResponseSeries data is (n_frames, n_rois), the transpose."""
         self.add()
