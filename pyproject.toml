@@ -21,7 +21,7 @@ dependencies = [
     "aind-data-schema-models==6.2.0",
     "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@00ae786fe3f411061f6c295c2c1ebd03d5e31d2f",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
-    "aind-nwb-utils==0.2.8",
+    "aind-nwb-utils==0.2.10",
     "aind-behavior-utils==0.3.4",
     "pynwb==4.1.0",
     "hdmf==6.1.0",
