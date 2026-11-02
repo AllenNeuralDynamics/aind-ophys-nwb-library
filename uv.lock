@@ -65,7 +65,7 @@ wheels = [
 
 [[package]]
 name = "aind-nwb-utils"
-version = "0.2.8"
+version = "0.2.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fsspec" },
@@ -76,9 +76,9 @@ dependencies = [
     { name = "xarray", version = "2025.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "xarray", version = "2026.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/f8/f4e66fd3d1c549f24d127de0772f2f23351da644589b7bdf214123bd7242/aind_nwb_utils-0.2.8.tar.gz", hash = "sha256:2467dfc0b4b2e2d8bd2ed7a1c40658c8f10b262b8b598b4adb483c934b7b5870", size = 39201420, upload-time = "2026-07-29T00:37:24.079Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/03/9e/6bddf9d810d634462aa5c35a76034250ab5802a60e5cbb6446c9ce999dca/aind_nwb_utils-0.2.10.tar.gz", hash = "sha256:9d5133069d8f4506e01d2872c68e2be76d3fa081c844ba6822117ba11b4f33f1", size = 39246740, upload-time = "2026-11-02T18:27:09.269Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c2/79/fcbc53898cff1ed891556c04af227a12a5bcc0816a5c836cc459eb0a9279/aind_nwb_utils-0.2.8-py3-none-any.whl", hash = "sha256:526aad95a8b34824be4dbdc7e8297c0845f709a843af53bd4d51101d820a919c", size = 14622, upload-time = "2026-07-29T00:37:22.382Z" },
+    { url = "https://files.pythonhosted.org/packages/88/29/9e72abd84d7972797ac3863a859189083acff3bcf6b26b33d0da5f22fa99/aind_nwb_utils-0.2.10-py3-none-any.whl", hash = "sha256:1d2be259eb7ee2493bb2a6368ed59494a8d68a777c90585f4895aba491b2e792", size = 19126, upload-time = "2026-11-02T18:27:07.545Z" },
 ]
 
 [[package]]
@@ -122,7 +122,7 @@ requires-dist = [
     { name = "aind-behavior-utils", specifier = "==0.3.4" },
     { name = "aind-data-schema", specifier = "==2.9.0" },
     { name = "aind-data-schema-models", specifier = "==6.2.0" },
-    { name = "aind-nwb-utils", specifier = "==0.2.8" },
+    { name = "aind-nwb-utils", specifier = "==0.2.10" },
     { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=00ae786fe3f411061f6c295c2c1ebd03d5e31d2f" },
     { name = "h5py", specifier = "==3.16.0" },
     { name = "hdmf", specifier = "==6.1.0" },
