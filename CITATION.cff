@@ -3,6 +3,6 @@ message: "If you use this software, please cite it as below."
 authors:
 - given-names: "Allen Institute for Neural Dynamics"
 title: "aind-ophys-nwb-library"
-version: "v0.1.1"
+version: "v0.1.2"
 date-release: 2026-07-30
 url: "https://github.com/AllenNeuralDynamics/aind-ophys-nwb-library"
