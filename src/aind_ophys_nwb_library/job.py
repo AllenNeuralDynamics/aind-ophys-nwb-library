@@ -21,7 +21,7 @@ logger = logging.getLogger("Ophys NWB packaging")
 
 PROCESS_NAME = mu.PROCESS_NAME
 
-#: Subdirectory of the results root that every output is written into.
+#: Subdirectory of the results root that holds this step's processing.json.
 NWB_SUBDIR = "nwb"
 
 VSYNC_LINES = ("2p_vsync", "vsync_2p")
@@ -123,11 +123,10 @@ def _package_session(
     metadata: mu.NwbMetadata,
     raw_dir: Path,
     processed_dir: Path,
-    output_dir: Path,
     code: Code,
     ctx: StageContext,
 ) -> None:
-    """Build and write the NWB file.
+    """Build and write the NWB file at the results root.
 
     ``code`` and ``ctx`` are populated as the run progresses.
     """
@@ -172,7 +171,7 @@ def _package_session(
     if session is SessionType.MULTIPLANE and not settings.skip_lab_metadata:
         nwb_builders.add_plane_lab_metadata(nwbfile, metadata.planes, settings.extension_namespace)
 
-    nwb_path = nwb_builders.write_nwb_zarr(nwbfile, output_dir / settings.nwb_name)
+    nwb_path = nwb_builders.write_nwb_zarr(nwbfile, results_root / settings.nwb_name)
     nwb_reference = relative_to_root(results_root, nwb_path)
     logger.info("Wrote %s", nwb_path)
 
@@ -260,4 +259,4 @@ def run(settings: Optional[NwbSettings] = None) -> None:
         ctx.upstream_names = collect_upstream_process_names(
             processed_dir, exclude=mu.DATA_PROCESS_NAME
         )
-        _package_session(settings, metadata, raw_dir, processed_dir, output_dir, code, ctx)
+        _package_session(settings, metadata, raw_dir, processed_dir, code, ctx)
