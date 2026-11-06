@@ -144,9 +144,16 @@ def _package_session(
         [relative_to_root(processed_dir, plane.extraction_h5) for plane in artifacts],
     )
 
-    # create_base_nwb_file reads the core files from one directory (not
-    # recursively), and dispatches session.json vs acquisition.json itself.
-    nwbfile = nwb_utils.create_base_nwb_file(metadata.core_file.parent)
+    if metadata.minimal:
+        nwbfile = nwb_builders.create_minimal_base_nwb(metadata)
+        if metadata.session.missing_optional:
+            ctx.notes = "Minimal metadata; NWB fields not supplied: " + ", ".join(
+                metadata.session.missing_optional
+            )
+    else:
+        # create_base_nwb_file reads the core files from one directory (not
+        # recursively), and dispatches session.json vs acquisition.json itself.
+        nwbfile = nwb_utils.create_base_nwb_file(metadata.core_file.parent)
     device, optical_channel = nwb_builders.create_microscope(nwbfile, metadata)
 
     timestamps: Dict[str, np.ndarray] = {}

@@ -19,7 +19,7 @@ version = "0.1.2"
 dependencies = [
     "aind-data-schema==2.9.0",
     "aind-data-schema-models==6.2.0",
-    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@v0.3.1",
+    "aind-pophys-metadata @ git+https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git@b3edec18eb15e0bdd247b0092f2f443a287e1c5f",
     "log-schema[cloudwatch] @ git+https://github.com/AllenNeuralDynamics/log-schema.git@f09685e#subdirectory=python",
     "aind-nwb-utils==0.2.10",
     "aind-behavior-utils==0.3.4",

@@ -314,6 +314,40 @@ class TestLoadNwbMetadata(unittest.TestCase):
         self.assertEqual(metadata.emission_wavelength, float(fixtures.EMISSION_NM))
         self.assertEqual(metadata.planes[0]["scale_factor"], fixtures.SCALE_UM_PER_PX)
 
+    def test_minimal_session_fields(self) -> None:
+        """A minimal document supplies the session fields and lists what it omits."""
+        blob = {
+            **fixtures.minimal_metadata(),
+            "institution": "Kempner Institute",
+            "subject": {"sex": "Female", "species": "Mus musculus", "genotype": "wt/wt"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = mu.load_nwb_metadata(_raw_mount(tmp, "metadata.json", blob))
+        self.assertTrue(metadata.minimal)
+        self.assertEqual(metadata.session.start_time, fixtures.SESSION_START_TIME)
+        self.assertEqual(metadata.session.institution, "Kempner Institute")
+        self.assertEqual(metadata.session.sex, "Female")
+        self.assertEqual(metadata.genotype, "wt/wt")
+        self.assertEqual(metadata.session.missing_optional, ("dataset_name", "date_of_birth"))
+
+    def test_minimal_without_start_time_fails_early(self) -> None:
+        """A minimal document with no start time is rejected when read, naming the field."""
+        blob = fixtures.minimal_metadata()
+        del blob["session_start_time"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _raw_mount(tmp, "metadata.json", blob)
+            with self.assertRaisesRegex(ValueError, "session_start_time"):
+                mu.load_nwb_metadata(root)
+
+    def test_v1_input_is_not_minimal(self) -> None:
+        """v1 input reads the session fields but keeps the core-file base builder."""
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = mu.load_nwb_metadata(
+                _raw_mount(tmp, "session.json", fixtures.v1_session())
+            )
+        self.assertFalse(metadata.minimal)
+        self.assertIsNone(metadata.session.start_time)
+
     def test_single_plane_gets_plane_zero_id(self) -> None:
         """One plane uses the canonical plane_0 id, never {structure}_0."""
         with tempfile.TemporaryDirectory() as tmp:

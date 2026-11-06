@@ -63,6 +63,26 @@ def plane_location(plane: Dict[str, Any]) -> str:
 
 
 @dataclass(frozen=True)
+class NwbSession:
+    """Session and subject fields for an NWB file built without core files.
+
+    Read for every input, but used only for a minimal ``metadata.json``: v1
+    and v2 input builds its base file from the core files directly.
+    """
+
+    start_time: Optional[str] = None
+    dataset_name: Optional[str] = None
+    institution: Optional[str] = None
+    subject_id: Optional[str] = None
+    sex: Optional[str] = None
+    species: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    genotype: Optional[str] = None
+    #: Optional NWB fields the input does not supply, in declaration order.
+    missing_optional: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class NwbMetadata:
     """Minimal metadata the NWB packaging step consumes.
 
@@ -81,6 +101,12 @@ class NwbMetadata:
     genotype: Optional[str] = None
     subject_id: Optional[str] = None
     dataset_name: Optional[str] = None
+    session: NwbSession = NwbSession()
+
+    @property
+    def minimal(self) -> bool:
+        """Return whether the input is a minimal ``metadata.json``."""
+        return self.schema_version == str(SchemaVersion.MINIMAL)
 
     @property
     def plane_ids(self) -> Tuple[str, ...]:
@@ -287,10 +313,15 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
     # cannot be packaged at all and fails here, naming the file and schema
     # version.
     frame_rate = core.get_frame_rate(required=True)
+    session = _session_fields(core)
 
     subject = core.subject_raw or {}
     # v1 keeps the genotype at the top level, v2 under subject_details.
-    genotype = subject.get("genotype") or (subject.get("subject_details") or {}).get("genotype")
+    genotype = (
+        subject.get("genotype")
+        or (subject.get("subject_details") or {}).get("genotype")
+        or session.genotype
+    )
     indicator = get_injection_material(procedures_raw) or genotype
     return NwbMetadata(
         schema_version=str(core.version),
@@ -304,6 +335,49 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
         genotype=genotype,
         subject_id=core.get_subject_id(),
         dataset_name=core.get_dataset_name(),
+        session=session,
+    )
+
+
+def _session_fields(core: CoreMetadata) -> NwbSession:
+    """Read the session and subject fields, failing on a missing start time.
+
+    An NWB file cannot be written without a session start time. v1 and v2
+    input is checked by the base-file builder that reads the core files, so
+    only a minimal document is checked here.
+
+    Parameters
+    ----------
+    core : aind_pophys_metadata.CoreMetadata
+        The located core metadata document.
+
+    Returns
+    -------
+    NwbSession
+        The session and subject fields.
+
+    Raises
+    ------
+    ValueError
+        If the input is a minimal document with no session start time.
+    """
+    report = core.check_nwb_requirements()
+    if core.version is SchemaVersion.MINIMAL and "session_start_time" in report.missing_required:
+        raise ValueError(
+            f"No session start time in {core.core_path.name}: set session_start_time, "
+            "or give the first epoch a start_time. An NWB file cannot be written without one."
+        )
+    details = core.get_subject_details()
+    return NwbSession(
+        start_time=core.get_session_start_time(),
+        dataset_name=core.get_dataset_name(),
+        institution=core.get_institution(),
+        subject_id=core.get_subject_id(),
+        sex=details["sex"],
+        species=details["species"],
+        date_of_birth=details["date_of_birth"],
+        genotype=details["genotype"],
+        missing_optional=report.missing_optional,
     )
 
 

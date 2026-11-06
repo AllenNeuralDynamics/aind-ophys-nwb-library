@@ -2,6 +2,8 @@
 
 import json
 import logging
+import uuid
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -17,6 +19,7 @@ from pynwb import NWBFile
 from pynwb.epoch import TimeIntervals
 from pynwb.image import GrayscaleImage, Images
 from pynwb.base import ProcessingModule
+from pynwb.file import Subject
 from pynwb.ophys import (
     DfOverF,
     Fluorescence,
@@ -240,6 +243,108 @@ def segmentation_approach(extraction_h5: Path) -> SegmentationApproach:
         if f.get("cellpose") is not None:
             return SegmentationApproach.SUITE2P_ANATOMICAL
     return SegmentationApproach.SUITE2P_ACTIVITY
+
+
+#: pynwb's accepted ``Subject.sex`` codes.
+_NWB_SEX_CODES = ("M", "F", "O", "U")
+
+
+def _parse_datetime(value: str, field: str) -> datetime:
+    """Parse an ISO 8601 timestamp, assuming UTC when it carries no offset.
+
+    Parameters
+    ----------
+    value : str
+        The timestamp.
+    field : str
+        Field name, used in the error message.
+
+    Returns
+    -------
+    datetime
+        A timezone-aware datetime.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not ISO 8601.
+    """
+    try:
+        # Python 3.10's fromisoformat rejects the "Z" suffix.
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as exc:
+        raise ValueError(f"{field} {value!r} is not an ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        logger.warning("%s %r has no UTC offset; assuming UTC", field, value)
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _nwb_sex(sex: Optional[str]) -> str:
+    """Map a recorded sex to pynwb's one-letter code, ``U`` when unknown."""
+    code = (sex or "U").strip()[:1].upper()
+    return code if code in _NWB_SEX_CODES else "U"
+
+
+def _minimal_subject(metadata: NwbMetadata, start: datetime) -> Optional[Subject]:
+    """Build the NWB subject from a minimal document's fields.
+
+    Parameters
+    ----------
+    metadata : NwbMetadata
+        The acquisition metadata.
+    start : datetime
+        Session start, whose timezone is given to the date of birth.
+
+    Returns
+    -------
+    pynwb.file.Subject or None
+        The subject, or ``None`` when the document identifies none.
+    """
+    session = metadata.session
+    if session.subject_id is None:
+        return None
+    birth = None
+    if session.date_of_birth is not None:
+        day = date.fromisoformat(session.date_of_birth[:10])
+        birth = datetime(day.year, day.month, day.day, tzinfo=start.tzinfo)
+    return Subject(
+        subject_id=session.subject_id,
+        sex=_nwb_sex(session.sex),
+        species=session.species,
+        date_of_birth=birth,
+        genotype=session.genotype,
+    )
+
+
+def create_minimal_base_nwb(metadata: NwbMetadata) -> NWBFile:
+    """Create the base NWB file from a minimal ``metadata.json``.
+
+    The counterpart of ``aind_nwb_utils.utils.create_base_nwb_file``, which
+    needs ``data_description.json``, ``subject.json`` and a session or
+    acquisition file. Optional fields the document omits are left out.
+
+    Parameters
+    ----------
+    metadata : NwbMetadata
+        The acquisition metadata, read from a minimal document.
+
+    Returns
+    -------
+    NWBFile
+        The base file, with session fields and, when identified, a subject.
+    """
+    session = metadata.session
+    start = _parse_datetime(session.start_time, "session_start_time")
+    name = session.dataset_name or session.subject_id or "unnamed session"
+    return NWBFile(
+        session_description=f"Optical physiology session {name}",
+        identifier=str(uuid.uuid4()),
+        session_start_time=start,
+        session_id=session.dataset_name,
+        institution=session.institution,
+        subject=_minimal_subject(metadata, start),
+    )
 
 
 def instrument_description(instrument_id: Optional[str]) -> str:

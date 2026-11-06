@@ -15,7 +15,7 @@ from pynwb import NWBFile
 
 from aind_ophys_nwb_library import nwb_builders as nb
 from aind_ophys_nwb_library.file_handling import PlaneArtifacts
-from aind_ophys_nwb_library.utils.metadata_utils import NwbMetadata
+from aind_ophys_nwb_library.utils.metadata_utils import NwbMetadata, NwbSession
 
 # Production shapes, scaled down only in the frame count: masks and
 # projections are full field of view, traces are (n_rois, n_frames).
@@ -758,6 +758,72 @@ class TestZarrRoundTrip(ExtractionFileCase):
         path = nb.write_nwb_zarr(nwbfile, self.root / "out" / "pophys.nwb.zarr")
         self.assertTrue(path.exists())
         self.assertEqual(nb.read_nwb_zarr(path), (PLANE_ID,))
+
+
+def minimal_nwb_metadata(**session: Any) -> NwbMetadata:
+    """Return acquisition metadata read from a minimal document, with the given session fields."""
+    return NwbMetadata(
+        schema_version="minimal",
+        core_file=Path("/data/metadata.json"),
+        planes=(),
+        frame_rate=FRAME_RATE,
+        session=NwbSession(**session),
+    )
+
+
+class TestCreateMinimalBaseNwb(unittest.TestCase):
+    """The base NWB file built from a minimal metadata.json."""
+
+    def test_full_session(self) -> None:
+        """Every supplied field reaches the file and its subject."""
+        nwbfile = nb.create_minimal_base_nwb(
+            minimal_nwb_metadata(
+                start_time="2026-10-30T09:00:00-04:00",
+                dataset_name="single-plane-ophys_0322R_2026-10-30_09-00-00",
+                institution="Kempner Institute",
+                subject_id="0322R",
+                sex="Male",
+                species="Mus musculus",
+                date_of_birth="2026-01-02",
+                genotype="wt/wt",
+            )
+        )
+        self.assertEqual(nwbfile.session_id, "single-plane-ophys_0322R_2026-10-30_09-00-00")
+        self.assertEqual(nwbfile.institution, "Kempner Institute")
+        self.assertEqual(nwbfile.session_start_time.utcoffset().total_seconds(), -4 * 3600)
+        self.assertIn("0322R", nwbfile.session_description)
+        self.assertEqual(nwbfile.subject.subject_id, "0322R")
+        self.assertEqual(nwbfile.subject.sex, "M")
+        self.assertEqual(nwbfile.subject.species, "Mus musculus")
+        self.assertEqual(nwbfile.subject.genotype, "wt/wt")
+        self.assertEqual(nwbfile.subject.date_of_birth.date().isoformat(), "2026-01-02")
+
+    def test_bare_session(self) -> None:
+        """Only a start time: no subject, a generic description, UTC assumed for a Z suffix."""
+        metadata = minimal_nwb_metadata(start_time="2026-10-30T09:00:00Z")
+        nwbfile = nb.create_minimal_base_nwb(metadata)
+        self.assertIsNone(nwbfile.subject)
+        self.assertIsNone(nwbfile.session_id)
+        self.assertIn("unnamed session", nwbfile.session_description)
+        self.assertEqual(nwbfile.session_start_time.tzinfo, timezone.utc)
+
+    def test_naive_start_time_is_assumed_utc(self) -> None:
+        """A start time with no offset is read as UTC, with a warning."""
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            metadata = minimal_nwb_metadata(start_time="2026-10-30T09:00:00")
+            nwbfile = nb.create_minimal_base_nwb(metadata)
+        self.assertEqual(nwbfile.session_start_time.tzinfo, timezone.utc)
+
+    def test_unparseable_start_time_names_the_field(self) -> None:
+        """A malformed start time fails with the field name."""
+        with self.assertRaisesRegex(ValueError, "session_start_time"):
+            nb.create_minimal_base_nwb(minimal_nwb_metadata(start_time="yesterday"))
+
+    def test_unknown_sex_maps_to_u(self) -> None:
+        """Unrecognised or missing sex values become pynwb's U code."""
+        self.assertEqual(nb._nwb_sex(None), "U")
+        self.assertEqual(nb._nwb_sex("unknown"), "U")
+        self.assertEqual(nb._nwb_sex("female"), "F")
 
 
 if __name__ == "__main__":
