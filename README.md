@@ -5,7 +5,7 @@
 [![semantic-release: angular](https://img.shields.io/badge/semantic--release-angular-e10079?logo=semantic-release)](https://github.com/semantic-release/semantic-release)
 ![Interrogate](https://img.shields.io/badge/interrogate-100.0%25-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
-![Python](https://img.shields.io/badge/python->=3.10-blue?logo=python)
+![Python](https://img.shields.io/badge/python->=3.10,<3.13-blue?logo=python)
 
 NWB packaging of AIND planar / population ophys pipeline outputs.
 
@@ -92,7 +92,7 @@ from this file with `auto-app-panel`.
 | `output_dir` | `/results` | results root |
 | `raw_subdir` | `raw` | subdirectory holding the core metadata, sync file and movies |
 | `processed_subdir` | `processed` | subdirectory holding every upstream step's results |
-| `nwb_name` | `pophys.nwb.zarr` | basename of the Zarr store, written inside `output_dir/nwb/` |
+| `nwb_name` | `pophys.nwb.zarr` | basename of the Zarr store, written at the root of `output_dir` |
 | `extension_namespace` | `ndx-aibs-behavior-ophys.namespace.yaml` | namespace YAML defining the per-plane `OphysMetadataSchema` lab metadata |
 | `skip_lab_metadata` | `False` | skip that lab metadata; use only when the YAML is unavailable |
 
@@ -159,12 +159,12 @@ input file, so messy-but-sufficient metadata still packages.
 
 ## Outputs
 
-Everything is written under `<output_dir>/nwb/`, never at the results root:
-`main.nf` publishes each step's files at their relative paths, so a root-level
-`processing.json` would collide with the run-level one the aggregator writes.
-
-- `pophys.nwb.zarr` (the `nwb_name` setting) — the packaged NWB Zarr store
-- `processing.json` — full v2 `Processing`, written by the shared `stage_guard`
+- `<output_dir>/pophys.nwb.zarr` (the `nwb_name` setting) — the packaged NWB
+  Zarr store, at the results root where downstream consumers look for it
+- `<output_dir>/nwb/processing.json` — full v2 `Processing`, written by the
+  shared `stage_guard`. It sits in a subdirectory because `main.nf` publishes
+  each step's files at their relative paths, so a root-level `processing.json`
+  would collide with the run-level one the metadata manager writes.
 
 Inside the NWB file, each plane gets a processing module named after its
 canonical plane id, holding:

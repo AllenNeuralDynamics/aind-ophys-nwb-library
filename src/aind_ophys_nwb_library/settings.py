@@ -32,7 +32,7 @@ class NwbSettings(BaseSettings, cli_parse_args=True):
     )
     nwb_name: str = Field(
         default="pophys.nwb.zarr",
-        description="Basename of the NWB Zarr store, written under output_dir/nwb.",
+        description="Basename of the NWB Zarr store, written at the root of output_dir.",
     )
     extension_namespace: Path = Field(
         default=DEFAULT_EXTENSION_NAMESPACE,
