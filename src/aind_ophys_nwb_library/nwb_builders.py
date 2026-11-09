@@ -6,7 +6,7 @@ import uuid
 from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import h5py
 import matplotlib.pyplot as plt
@@ -52,7 +52,6 @@ OPTICAL_CHANNEL_NAME = "channel_0"
 # GCaMP6 emission placeholder, used only when the acquisition metadata carries
 # no per-channel emission wavelength (always the case for v1 input).
 DEFAULT_EMISSION_LAMBDA = 514.0
-MESOSCOPE_DESCRIPTION = "AIND Multiplane Mesoscope 2P Rig"
 
 
 class SegmentationApproach(Enum):
@@ -347,24 +346,6 @@ def create_minimal_base_nwb(metadata: NwbMetadata) -> NWBFile:
     )
 
 
-def instrument_description(instrument_id: Optional[str]) -> str:
-    """Describe the microscope from its instrument id.
-
-    Parameters
-    ----------
-    instrument_id : str or None
-        v1 ``rig_id`` (``MESO.2``) / v2 ``instrument_id`` (``422_MESO2_20260122``).
-
-    Returns
-    -------
-    str
-        A human-readable description.
-    """
-    if instrument_id and "MESO" in instrument_id.upper():
-        return MESOSCOPE_DESCRIPTION
-    return f"AIND 2P rig {instrument_id}" if instrument_id else "Unknown 2P rig"
-
-
 def create_microscope(
     nwbfile: NWBFile,
     metadata: NwbMetadata,
@@ -386,11 +367,11 @@ def create_microscope(
         The optical channel, using the acquisition's emission wavelength when
         it carries one.
     """
-    name = metadata.instrument_id or "unknown-instrument"
+    instrument = metadata.instrument
     device = nwbfile.create_device(
-        name=name,
-        description=instrument_description(metadata.instrument_id),
-        manufacturer="Thorlabs",
+        name=instrument.name or metadata.instrument_id or "unknown-instrument",
+        description=instrument.description,
+        manufacturer=instrument.manufacturer,
     )
     emission = metadata.emission_wavelength
     channel = OpticalChannel(
@@ -1058,6 +1039,7 @@ def add_epoch_intervals(
     nwbfile: NWBFile,
     epoch_json: Path,
     frame_rate: float,
+    labels: Optional[Mapping[str, str]] = None,
 ) -> NWBFile:
     """Add single-plane epoch intervals from ``epoch_locations.json``.
 
@@ -1070,12 +1052,16 @@ def add_epoch_intervals(
         ``[start_frame, stop_frame]``.
     frame_rate : float
         Frame rate in Hz, used to convert frame indices to seconds.
+    labels : mapping of str to str, optional
+        Epoch name per TIFF stem (``NwbMetadata.epoch_labels``); a stem
+        without one keeps its own name.
 
     Returns
     -------
     NWBFile
         The updated file.
     """
+    labels = labels or {}
     with open(epoch_json, "r") as f:
         epochs = json.load(f)
     table = TimeIntervals(
@@ -1087,19 +1073,13 @@ def add_epoch_intervals(
             {"name": "stop_frame", "description": "stop_frame"},
         ],
     )
-    for name, (start_frame, stop_frame) in epochs.items():
-        if "neuron" in name and "slm" not in name:
-            name = "BCI"
-        elif "slm" in name and "post" not in name:
-            name = "photostim"
-        elif "slm" in name and "post" in name:
-            name = "photostim_post"
+    for stem, (start_frame, stop_frame) in epochs.items():
         table.add_row(
             start_time=start_frame / frame_rate,
             stop_time=stop_frame / frame_rate,
             start_frame=start_frame,
             stop_frame=stop_frame,
-            stimulus_name=name,
+            stimulus_name=labels.get(stem, stem),
         )
     nwbfile.add_time_intervals(table)
     return nwbfile

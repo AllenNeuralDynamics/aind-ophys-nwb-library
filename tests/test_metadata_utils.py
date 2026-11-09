@@ -330,6 +330,60 @@ class TestLoadNwbMetadata(unittest.TestCase):
         self.assertEqual(metadata.genotype, "wt/wt")
         self.assertEqual(metadata.session.missing_optional, ("dataset_name", "date_of_birth"))
 
+    def test_v2_instrument_and_epoch_labels_are_derived(self) -> None:
+        """AIND input keeps the device text and Bergamo epoch names."""
+        acquisition = {
+            **fixtures.v2_acquisition(),
+            "instrument_id": "442_Bergamo_2p_photostim",
+            "stimulus_epochs": [
+                {
+                    "stimulus_name": "single neuron BCI conditioning",
+                    "output_parameters": {"tiff_stem": "neuron3"},
+                },
+                {
+                    "stimulus_name": "2p photostimulation",
+                    "output_parameters": {"tiff_stem": "slm_post"},
+                },
+                {"stimulus_name": "spontaneous activity"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = mu.load_nwb_metadata(
+                _raw_mount(tmp, "acquisition.json", acquisition)
+            )
+        self.assertEqual(
+            metadata.instrument,
+            mu.NwbInstrument(
+                name="442_Bergamo_2p_photostim",
+                manufacturer="Thorlabs",
+                description="AIND 2P rig 442_Bergamo_2p_photostim",
+            ),
+        )
+        self.assertEqual(
+            metadata.epoch_labels,
+            (("neuron3", "BCI"), ("slm_post", "photostim_post")),
+        )
+
+    def test_minimal_instrument_and_epoch_labels_are_stated(self) -> None:
+        """A minimal document names its own device and epochs."""
+        blob = {
+            **fixtures.minimal_metadata(),
+            "instrument": {"name": "scope", "description": "Resonant 2P"},
+            "epochs": [
+                {"stimulus_name": "recording", "tiff_stem": "file"},
+                {"stimulus_name": "x", "tiff_stem": "y", "label": "stim"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = mu.load_nwb_metadata(_raw_mount(tmp, "metadata.json", blob))
+        self.assertEqual(
+            metadata.instrument,
+            mu.NwbInstrument(name="scope", description="Resonant 2P"),
+        )
+        self.assertEqual(
+            metadata.epoch_labels, (("file", "recording"), ("y", "stim"))
+        )
+
     def test_minimal_without_start_time_fails_early(self) -> None:
         """A minimal document with no start time is rejected when read, naming the field."""
         blob = fixtures.minimal_metadata()

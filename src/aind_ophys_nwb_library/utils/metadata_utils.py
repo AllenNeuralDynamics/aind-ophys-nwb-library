@@ -63,6 +63,19 @@ def plane_location(plane: Dict[str, Any]) -> str:
 
 
 @dataclass(frozen=True)
+class NwbInstrument:
+    """The microscope, as ``aind_pophys_metadata`` reports it.
+
+    A minimal ``metadata.json`` states these; v1 and v2 values are derived
+    from the AIND instrument id.
+    """
+
+    name: Optional[str] = None
+    manufacturer: Optional[str] = None
+    description: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class NwbSession:
     """Session and subject fields for an NWB file built without core files.
 
@@ -102,6 +115,9 @@ class NwbMetadata:
     subject_id: Optional[str] = None
     dataset_name: Optional[str] = None
     session: NwbSession = NwbSession()
+    instrument: NwbInstrument = NwbInstrument()
+    #: ``(tiff_stem, label)`` per stimulus epoch, naming the NWB epochs.
+    epoch_labels: Tuple[Tuple[str, str], ...] = ()
 
     @property
     def minimal(self) -> bool:
@@ -336,6 +352,12 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
         subject_id=core.get_subject_id(),
         dataset_name=core.get_dataset_name(),
         session=session,
+        instrument=NwbInstrument(**core.get_instrument()),
+        epoch_labels=tuple(
+            (epoch["tiff_stem"], epoch["label"])
+            for epoch in core.get_epoch_records()
+            if epoch["tiff_stem"] and epoch["label"]
+        ),
     )
 
 

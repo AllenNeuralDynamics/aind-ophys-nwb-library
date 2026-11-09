@@ -160,7 +160,9 @@ def _package_session(
     if session is SessionType.MULTIPLANE:
         timestamps = _plane_timestamps(metadata, raw_dir)
     elif session is SessionType.SINGLE_PLANE_WITH_EPOCHS:
-        nwb_builders.add_epoch_intervals(nwbfile, epoch_json, metadata.frame_rate)
+        nwb_builders.add_epoch_intervals(
+            nwbfile, epoch_json, metadata.frame_rate, dict(metadata.epoch_labels)
+        )
 
     total_rois = 0
     for plane, plane_artifacts in zip(metadata.planes, artifacts):
