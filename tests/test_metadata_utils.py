@@ -331,7 +331,7 @@ class TestLoadNwbMetadata(unittest.TestCase):
         self.assertEqual(metadata.session.missing_optional, ("dataset_name", "date_of_birth"))
 
     def test_v2_instrument_and_epoch_labels_are_derived(self) -> None:
-        """AIND input keeps the device text and Bergamo epoch names."""
+        """AIND input names the device by id and labels Bergamo epochs."""
         acquisition = {
             **fixtures.v2_acquisition(),
             "instrument_id": "442_Bergamo_2p_photostim",
@@ -353,11 +353,7 @@ class TestLoadNwbMetadata(unittest.TestCase):
             )
         self.assertEqual(
             metadata.instrument,
-            mu.NwbInstrument(
-                name="442_Bergamo_2p_photostim",
-                manufacturer="Thorlabs",
-                description="AIND 2P rig 442_Bergamo_2p_photostim",
-            ),
+            mu.NwbInstrument(name="442_Bergamo_2p_photostim"),
         )
         self.assertEqual(
             metadata.epoch_labels,

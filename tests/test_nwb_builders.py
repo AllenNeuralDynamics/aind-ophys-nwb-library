@@ -492,15 +492,15 @@ class TestCreateMicroscope(unittest.TestCase):
         metadata = replace(
             nwb_metadata(Path("/data/acquisition.json"), []),
             instrument=NwbInstrument(
-                name="MESO.1",
-                manufacturer="Thorlabs",
-                description="AIND Multiplane Mesoscope 2P Rig",
+                name="rig-a",
+                manufacturer="Bruker",
+                description="Resonant 2P",
             ),
         )
         device = self._device(metadata)
         self.assertEqual(
             (device.name, device.manufacturer, device.description),
-            ("MESO.1", "Thorlabs", "AIND Multiplane Mesoscope 2P Rig"),
+            ("rig-a", "Bruker", "Resonant 2P"),
         )
 
     def test_nothing_reported_invents_no_manufacturer(self) -> None:
