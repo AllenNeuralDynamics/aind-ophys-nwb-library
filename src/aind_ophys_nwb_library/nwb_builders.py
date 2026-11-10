@@ -298,10 +298,17 @@ def _minimal_subject(metadata: NwbMetadata, start: datetime) -> Optional[Subject
     Returns
     -------
     pynwb.file.Subject or None
-        The subject, or ``None`` when the document identifies none.
+        The subject, or ``None`` when the document states no subject field.
     """
     session = metadata.session
-    if session.subject_id is None:
+    fields = (
+        session.subject_id,
+        session.sex,
+        session.species,
+        session.date_of_birth,
+        session.genotype,
+    )
+    if all(value is None for value in fields):
         return None
     birth = None
     if session.date_of_birth is not None:

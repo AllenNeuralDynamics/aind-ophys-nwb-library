@@ -878,6 +878,16 @@ class TestCreateMinimalBaseNwb(unittest.TestCase):
         self.assertIn("unnamed session", nwbfile.session_description)
         self.assertEqual(nwbfile.session_start_time.tzinfo, timezone.utc)
 
+    def test_subject_without_an_id(self) -> None:
+        """Stated subject fields are kept when the subject id is missing."""
+        metadata = minimal_nwb_metadata(
+            start_time="2026-10-30T09:00:00Z", species="Mus musculus", sex="Female"
+        )
+        nwbfile = nb.create_minimal_base_nwb(metadata)
+        self.assertIsNone(nwbfile.subject.subject_id)
+        self.assertEqual(nwbfile.subject.species, "Mus musculus")
+        self.assertEqual(nwbfile.subject.sex, "F")
+
     def test_naive_start_time_is_assumed_utc(self) -> None:
         """A start time with no offset is read as UTC, with a warning."""
         with self.assertLogs(nb.logger, level=logging.WARNING):
