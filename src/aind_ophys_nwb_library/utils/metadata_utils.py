@@ -77,11 +77,7 @@ class NwbInstrument:
 
 @dataclass(frozen=True)
 class NwbSession:
-    """Session and subject fields for an NWB file built without core files.
-
-    Read for every input, but used only for a minimal ``metadata.json``: v1
-    and v2 input builds its base file from the core files directly.
-    """
+    """Session and subject fields for an NWB file built without core files."""
 
     start_time: Optional[str] = None
     dataset_name: Optional[str] = None
@@ -362,11 +358,7 @@ def load_nwb_metadata(raw_dir: Path) -> NwbMetadata:
 
 
 def _session_fields(core: CoreMetadata) -> NwbSession:
-    """Read the session and subject fields, failing on a missing start time.
-
-    An NWB file cannot be written without a session start time. v1 and v2
-    input is checked by the base-file builder that reads the core files, so
-    only a minimal document is checked here.
+    """Read the session and subject fields, failing on a minimal document's missing start time.
 
     Parameters
     ----------

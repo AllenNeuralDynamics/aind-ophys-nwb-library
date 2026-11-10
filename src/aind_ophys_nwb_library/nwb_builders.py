@@ -319,9 +319,7 @@ def _minimal_subject(metadata: NwbMetadata, start: datetime) -> Optional[Subject
 def create_minimal_base_nwb(metadata: NwbMetadata) -> NWBFile:
     """Create the base NWB file from a minimal ``metadata.json``.
 
-    The counterpart of ``aind_nwb_utils.utils.create_base_nwb_file``, which
-    needs ``data_description.json``, ``subject.json`` and a session or
-    acquisition file. Optional fields the document omits are left out.
+    Optional fields the document omits are left out.
 
     Parameters
     ----------

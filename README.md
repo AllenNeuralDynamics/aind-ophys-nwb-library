@@ -117,7 +117,7 @@ The pynwb object construction. `add_plane()` adds one plane's imaging plane,
 segmentation, summary images and traces, and is shared by the multiplane and
 single-plane paths — parameterised by the timing source and the container-name
 suffix, so a fix cannot land on one path and miss the other. Also
-`create_microscope()`, `segmentation_approach()`,
+`create_microscope()`, `create_minimal_base_nwb()`, `segmentation_approach()`,
 `collapse_masks_to_label_image()`, `sync_timestamps_per_plane()`,
 `add_epoch_intervals()`, `add_plane_lab_metadata()`, `load_pynwb_extension()`,
 the HDF5 reads (`load_dataset()`, `try_load_dataset()`, `load_roi_masks()`,
