@@ -16,11 +16,6 @@ jobs:
     - uses: actions/checkout@v7
       with:
         persist-credentials: false
-    - name: Authenticate git for cross-repo dependency fetches
-      run: |
-        git config --global \
-          url."https://x-access-token:${{ secrets.SERVICE_TOKEN }}@github.com/".insteadOf \
-          "https://github.com/"
     - name: Set up Python ${{ matrix.python-version }}
       uses: astral-sh/setup-uv@v7
       with:
