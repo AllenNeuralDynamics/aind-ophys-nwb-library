@@ -1,12 +1,14 @@
 """Tests for the pynwb builders over real HDF5 payloads."""
 
+import json
 import logging
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import h5py
 import imageio.v3 as iio
@@ -15,7 +17,7 @@ from pynwb import NWBFile
 
 from aind_ophys_nwb_library import nwb_builders as nb
 from aind_ophys_nwb_library.file_handling import PlaneArtifacts
-from aind_ophys_nwb_library.utils.metadata_utils import NwbMetadata
+from aind_ophys_nwb_library.utils.metadata_utils import NwbInstrument, NwbMetadata, NwbSession
 
 # Production shapes, scaled down only in the frame count: masks and
 # projections are full field of view, traces are (n_rois, n_frames).
@@ -461,22 +463,91 @@ class TestSeriesTiming(unittest.TestCase):
         self.assertEqual(reduced.shape, (HEIGHT, WIDTH))
 
 
-class TestInstrumentDescription(unittest.TestCase):
-    """The microscope description from the v1 rig id or the v2 instrument id."""
+class TestCreateMicroscope(unittest.TestCase):
+    """The device is written from the reported instrument."""
 
-    def test_mesoscope_ids_from_either_version(self) -> None:
-        """v2 names the mesoscope by its dated instrument id."""
-        for instrument_id in ("MESO.1", "MESO.2", "422_MESO2_20260122"):
-            with self.subTest(instrument_id=instrument_id):
-                self.assertEqual(nb.instrument_description(instrument_id), nb.MESOSCOPE_DESCRIPTION)
+    def _device(self, metadata: NwbMetadata) -> Any:
+        """Create the microscope on an empty file and return the device.
 
-    def test_other_rigs_are_named(self) -> None:
-        """A non-mesoscope rig keeps its id in the description."""
-        self.assertEqual(
-            nb.instrument_description("442_Bergamo_2p_photostim"),
-            "AIND 2P rig 442_Bergamo_2p_photostim",
+        Parameters
+        ----------
+        metadata : NwbMetadata
+            The acquisition metadata.
+
+        Returns
+        -------
+        pynwb.device.Device
+            The created device.
+        """
+        nwbfile = NWBFile(
+            session_description="test",
+            identifier="test",
+            session_start_time=datetime.now(timezone.utc),
         )
-        self.assertEqual(nb.instrument_description(None), "Unknown 2P rig")
+        device, _ = nb.create_microscope(nwbfile, metadata)
+        return device
+
+    def test_reported_instrument_is_written(self) -> None:
+        """Name, manufacturer and description pass through unchanged."""
+        metadata = replace(
+            nwb_metadata(Path("/data/acquisition.json"), []),
+            instrument=NwbInstrument(
+                name="rig-a",
+                manufacturer="Bruker",
+                description="Resonant 2P",
+            ),
+        )
+        device = self._device(metadata)
+        self.assertEqual(
+            (device.name, device.manufacturer, device.description),
+            ("rig-a", "Bruker", "Resonant 2P"),
+        )
+
+    def test_nothing_reported_invents_no_manufacturer(self) -> None:
+        """An unnamed instrument falls back to the id, then a placeholder."""
+        metadata = replace(
+            nwb_metadata(Path("/data/metadata.json"), []), instrument_id=None
+        )
+        device = self._device(metadata)
+        self.assertEqual(device.name, "unknown-instrument")
+        self.assertIsNone(device.manufacturer)
+
+
+class TestAddEpochIntervals(unittest.TestCase):
+    """Epochs are named by the reported labels."""
+
+    def _names(self, labels: Optional[Dict[str, str]]) -> List[str]:
+        """Write two epochs and return their NWB names.
+
+        Parameters
+        ----------
+        labels : dict, optional
+            Label per TIFF stem.
+
+        Returns
+        -------
+        list of str
+            The epoch table's stimulus names.
+        """
+        epoch_json = Path(tempfile.mkdtemp()) / "epoch_locations.json"
+        epoch_json.write_text(
+            json.dumps({"neuron3": [0, 10], "spont": [10, 20]})
+        )
+        nwbfile = NWBFile(
+            session_description="test",
+            identifier="test",
+            session_start_time=datetime.now(timezone.utc),
+        )
+        nb.add_epoch_intervals(nwbfile, epoch_json, FRAME_RATE, labels)
+        return list(nwbfile.get_time_intervals("epochs")["stimulus_name"][:])
+
+    def test_labels_name_the_epochs(self) -> None:
+        """A stem with a label is written under it."""
+        self.assertEqual(self._names({"neuron3": "BCI"}), ["BCI", "spont"])
+
+    def test_unlabelled_stems_keep_their_names(self) -> None:
+        """Without labels every epoch keeps its stem."""
+        self.assertEqual(self._names(None), ["neuron3", "spont"])
 
 
 class TestSyncTimestampsPerPlane(unittest.TestCase):
@@ -758,6 +829,82 @@ class TestZarrRoundTrip(ExtractionFileCase):
         path = nb.write_nwb_zarr(nwbfile, self.root / "out" / "pophys.nwb.zarr")
         self.assertTrue(path.exists())
         self.assertEqual(nb.read_nwb_zarr(path), (PLANE_ID,))
+
+
+def minimal_nwb_metadata(**session: Any) -> NwbMetadata:
+    """Return acquisition metadata read from a minimal document, with the given session fields."""
+    return NwbMetadata(
+        schema_version="minimal",
+        core_file=Path("/data/metadata.json"),
+        planes=(),
+        frame_rate=FRAME_RATE,
+        session=NwbSession(**session),
+    )
+
+
+class TestCreateMinimalBaseNwb(unittest.TestCase):
+    """The base NWB file built from a minimal metadata.json."""
+
+    def test_full_session(self) -> None:
+        """Every supplied field reaches the file and its subject."""
+        nwbfile = nb.create_minimal_base_nwb(
+            minimal_nwb_metadata(
+                start_time="2026-10-30T09:00:00-04:00",
+                dataset_name="single-plane-ophys_0322R_2026-10-30_09-00-00",
+                institution="Kempner Institute",
+                subject_id="0322R",
+                sex="Male",
+                species="Mus musculus",
+                date_of_birth="2026-01-02",
+                genotype="wt/wt",
+            )
+        )
+        self.assertEqual(nwbfile.session_id, "single-plane-ophys_0322R_2026-10-30_09-00-00")
+        self.assertEqual(nwbfile.institution, "Kempner Institute")
+        self.assertEqual(nwbfile.session_start_time.utcoffset().total_seconds(), -4 * 3600)
+        self.assertIn("0322R", nwbfile.session_description)
+        self.assertEqual(nwbfile.subject.subject_id, "0322R")
+        self.assertEqual(nwbfile.subject.sex, "M")
+        self.assertEqual(nwbfile.subject.species, "Mus musculus")
+        self.assertEqual(nwbfile.subject.genotype, "wt/wt")
+        self.assertEqual(nwbfile.subject.date_of_birth.date().isoformat(), "2026-01-02")
+
+    def test_bare_session(self) -> None:
+        """Only a start time: no subject, a generic description, UTC assumed for a Z suffix."""
+        metadata = minimal_nwb_metadata(start_time="2026-10-30T09:00:00Z")
+        nwbfile = nb.create_minimal_base_nwb(metadata)
+        self.assertIsNone(nwbfile.subject)
+        self.assertIsNone(nwbfile.session_id)
+        self.assertIn("unnamed session", nwbfile.session_description)
+        self.assertEqual(nwbfile.session_start_time.tzinfo, timezone.utc)
+
+    def test_subject_without_an_id(self) -> None:
+        """Stated subject fields are kept when the subject id is missing."""
+        metadata = minimal_nwb_metadata(
+            start_time="2026-10-30T09:00:00Z", species="Mus musculus", sex="Female"
+        )
+        nwbfile = nb.create_minimal_base_nwb(metadata)
+        self.assertIsNone(nwbfile.subject.subject_id)
+        self.assertEqual(nwbfile.subject.species, "Mus musculus")
+        self.assertEqual(nwbfile.subject.sex, "F")
+
+    def test_naive_start_time_is_assumed_utc(self) -> None:
+        """A start time with no offset is read as UTC, with a warning."""
+        with self.assertLogs(nb.logger, level=logging.WARNING):
+            metadata = minimal_nwb_metadata(start_time="2026-10-30T09:00:00")
+            nwbfile = nb.create_minimal_base_nwb(metadata)
+        self.assertEqual(nwbfile.session_start_time.tzinfo, timezone.utc)
+
+    def test_unparseable_start_time_names_the_field(self) -> None:
+        """A malformed start time fails with the field name."""
+        with self.assertRaisesRegex(ValueError, "session_start_time"):
+            nb.create_minimal_base_nwb(minimal_nwb_metadata(start_time="yesterday"))
+
+    def test_unknown_sex_maps_to_u(self) -> None:
+        """Unrecognised or missing sex values become pynwb's U code."""
+        self.assertEqual(nb._nwb_sex(None), "U")
+        self.assertEqual(nb._nwb_sex("unknown"), "U")
+        self.assertEqual(nb._nwb_sex("female"), "F")
 
 
 if __name__ == "__main__":

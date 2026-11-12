@@ -16,6 +16,7 @@ SCALE_UM_PER_PX = 0.78
 SCALE_MM_PER_PX = SCALE_UM_PER_PX / 1000
 FOV_WIDTH = 512
 FOV_HEIGHT = 512
+SESSION_START_TIME = "2026-07-30T12:00:00-07:00"
 STRUCTURES = ("VISp", "VISl")
 
 
@@ -230,6 +231,7 @@ def minimal_metadata(plane_count: int = 2) -> dict:
         "subject_id": SUBJECT_ID,
         "excitation_nm": EXCITATION_NM,
         "emission_nm": EMISSION_NM,
+        "session_start_time": SESSION_START_TIME,
         "planes": [
             {
                 "plane_index": index,
