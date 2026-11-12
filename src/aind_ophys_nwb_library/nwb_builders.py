@@ -2,9 +2,11 @@
 
 import json
 import logging
+import uuid
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import h5py
 import matplotlib.pyplot as plt
@@ -17,6 +19,7 @@ from pynwb import NWBFile
 from pynwb.epoch import TimeIntervals
 from pynwb.image import GrayscaleImage, Images
 from pynwb.base import ProcessingModule
+from pynwb.file import Subject
 from pynwb.ophys import (
     DfOverF,
     Fluorescence,
@@ -49,7 +52,6 @@ OPTICAL_CHANNEL_NAME = "channel_0"
 # GCaMP6 emission placeholder, used only when the acquisition metadata carries
 # no per-channel emission wavelength (always the case for v1 input).
 DEFAULT_EMISSION_LAMBDA = 514.0
-MESOSCOPE_DESCRIPTION = "AIND Multiplane Mesoscope 2P Rig"
 
 
 class SegmentationApproach(Enum):
@@ -242,22 +244,111 @@ def segmentation_approach(extraction_h5: Path) -> SegmentationApproach:
     return SegmentationApproach.SUITE2P_ACTIVITY
 
 
-def instrument_description(instrument_id: Optional[str]) -> str:
-    """Describe the microscope from its instrument id.
+#: pynwb's accepted ``Subject.sex`` codes.
+_NWB_SEX_CODES = ("M", "F", "O", "U")
+
+
+def _parse_datetime(value: str, field: str) -> datetime:
+    """Parse an ISO 8601 timestamp, assuming UTC when it carries no offset.
 
     Parameters
     ----------
-    instrument_id : str or None
-        v1 ``rig_id`` (``MESO.2``) / v2 ``instrument_id`` (``422_MESO2_20260122``).
+    value : str
+        The timestamp.
+    field : str
+        Field name, used in the error message.
 
     Returns
     -------
-    str
-        A human-readable description.
+    datetime
+        A timezone-aware datetime.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not ISO 8601.
     """
-    if instrument_id and "MESO" in instrument_id.upper():
-        return MESOSCOPE_DESCRIPTION
-    return f"AIND 2P rig {instrument_id}" if instrument_id else "Unknown 2P rig"
+    try:
+        # Python 3.10's fromisoformat rejects the "Z" suffix.
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as exc:
+        raise ValueError(f"{field} {value!r} is not an ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        logger.warning("%s %r has no UTC offset; assuming UTC", field, value)
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _nwb_sex(sex: Optional[str]) -> str:
+    """Map a recorded sex to pynwb's one-letter code, ``U`` when unknown."""
+    code = (sex or "U").strip()[:1].upper()
+    return code if code in _NWB_SEX_CODES else "U"
+
+
+def _minimal_subject(metadata: NwbMetadata, start: datetime) -> Optional[Subject]:
+    """Build the NWB subject from a minimal document's fields.
+
+    Parameters
+    ----------
+    metadata : NwbMetadata
+        The acquisition metadata.
+    start : datetime
+        Session start, whose timezone is given to the date of birth.
+
+    Returns
+    -------
+    pynwb.file.Subject or None
+        The subject, or ``None`` when the document states no subject field.
+    """
+    session = metadata.session
+    fields = (
+        session.subject_id,
+        session.sex,
+        session.species,
+        session.date_of_birth,
+        session.genotype,
+    )
+    if all(value is None for value in fields):
+        return None
+    birth = None
+    if session.date_of_birth is not None:
+        day = date.fromisoformat(session.date_of_birth[:10])
+        birth = datetime(day.year, day.month, day.day, tzinfo=start.tzinfo)
+    return Subject(
+        subject_id=session.subject_id,
+        sex=_nwb_sex(session.sex),
+        species=session.species,
+        date_of_birth=birth,
+        genotype=session.genotype,
+    )
+
+
+def create_minimal_base_nwb(metadata: NwbMetadata) -> NWBFile:
+    """Create the base NWB file from a minimal ``metadata.json``.
+
+    Optional fields the document omits are left out.
+
+    Parameters
+    ----------
+    metadata : NwbMetadata
+        The acquisition metadata, read from a minimal document.
+
+    Returns
+    -------
+    NWBFile
+        The base file, with session fields and, when identified, a subject.
+    """
+    session = metadata.session
+    start = _parse_datetime(session.start_time, "session_start_time")
+    name = session.dataset_name or session.subject_id or "unnamed session"
+    return NWBFile(
+        session_description=f"Optical physiology session {name}",
+        identifier=str(uuid.uuid4()),
+        session_start_time=start,
+        session_id=session.dataset_name,
+        institution=session.institution,
+        subject=_minimal_subject(metadata, start),
+    )
 
 
 def create_microscope(
@@ -281,11 +372,11 @@ def create_microscope(
         The optical channel, using the acquisition's emission wavelength when
         it carries one.
     """
-    name = metadata.instrument_id or "unknown-instrument"
+    instrument = metadata.instrument
     device = nwbfile.create_device(
-        name=name,
-        description=instrument_description(metadata.instrument_id),
-        manufacturer="Thorlabs",
+        name=instrument.name or metadata.instrument_id or "unknown-instrument",
+        description=instrument.description,
+        manufacturer=instrument.manufacturer,
     )
     emission = metadata.emission_wavelength
     channel = OpticalChannel(
@@ -953,6 +1044,7 @@ def add_epoch_intervals(
     nwbfile: NWBFile,
     epoch_json: Path,
     frame_rate: float,
+    labels: Optional[Mapping[str, str]] = None,
 ) -> NWBFile:
     """Add single-plane epoch intervals from ``epoch_locations.json``.
 
@@ -965,12 +1057,16 @@ def add_epoch_intervals(
         ``[start_frame, stop_frame]``.
     frame_rate : float
         Frame rate in Hz, used to convert frame indices to seconds.
+    labels : mapping of str to str, optional
+        Epoch name per TIFF stem (``NwbMetadata.epoch_labels``); a stem
+        without one keeps its own name.
 
     Returns
     -------
     NWBFile
         The updated file.
     """
+    labels = labels or {}
     with open(epoch_json, "r") as f:
         epochs = json.load(f)
     table = TimeIntervals(
@@ -982,19 +1078,13 @@ def add_epoch_intervals(
             {"name": "stop_frame", "description": "stop_frame"},
         ],
     )
-    for name, (start_frame, stop_frame) in epochs.items():
-        if "neuron" in name and "slm" not in name:
-            name = "BCI"
-        elif "slm" in name and "post" not in name:
-            name = "photostim"
-        elif "slm" in name and "post" in name:
-            name = "photostim_post"
+    for stem, (start_frame, stop_frame) in epochs.items():
         table.add_row(
             start_time=start_frame / frame_rate,
             stop_time=stop_frame / frame_rate,
             start_frame=start_frame,
             stop_frame=stop_frame,
-            stimulus_name=name,
+            stimulus_name=labels.get(stem, stem),
         )
     nwbfile.add_time_intervals(table)
     return nwbfile

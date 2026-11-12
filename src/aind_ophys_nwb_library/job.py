@@ -144,16 +144,25 @@ def _package_session(
         [relative_to_root(processed_dir, plane.extraction_h5) for plane in artifacts],
     )
 
-    # create_base_nwb_file reads the core files from one directory (not
-    # recursively), and dispatches session.json vs acquisition.json itself.
-    nwbfile = nwb_utils.create_base_nwb_file(metadata.core_file.parent)
+    if metadata.minimal:
+        nwbfile = nwb_builders.create_minimal_base_nwb(metadata)
+        if metadata.session.missing_optional:
+            ctx.notes = "Minimal metadata; NWB fields not supplied: " + ", ".join(
+                metadata.session.missing_optional
+            )
+    else:
+        # create_base_nwb_file reads the core files from one directory (not
+        # recursively), and dispatches session.json vs acquisition.json itself.
+        nwbfile = nwb_utils.create_base_nwb_file(metadata.core_file.parent)
     device, optical_channel = nwb_builders.create_microscope(nwbfile, metadata)
 
     timestamps: Dict[str, np.ndarray] = {}
     if session is SessionType.MULTIPLANE:
         timestamps = _plane_timestamps(metadata, raw_dir)
     elif session is SessionType.SINGLE_PLANE_WITH_EPOCHS:
-        nwb_builders.add_epoch_intervals(nwbfile, epoch_json, metadata.frame_rate)
+        nwb_builders.add_epoch_intervals(
+            nwbfile, epoch_json, metadata.frame_rate, dict(metadata.epoch_labels)
+        )
 
     total_rois = 0
     for plane, plane_artifacts in zip(metadata.planes, artifacts):
@@ -252,7 +261,7 @@ def run(settings: Optional[NwbSettings] = None) -> None:
         code,
         logger=logger,
         name=mu.DATA_PROCESS_NAME,
-        output_path=relative_to_root(results_root, output_dir),
+        output_path=settings.nwb_name,
     ) as ctx:
         # Every upstream processing.json staged into this task is a flat
         # sibling dependency: no ordering, no parent/grandparent distinction.
