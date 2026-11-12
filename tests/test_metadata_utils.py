@@ -514,7 +514,7 @@ class TestStageDocument(unittest.TestCase):
             ProcessName.FILE_FORMAT_CONVERSION,
             code,
             name=mu.DATA_PROCESS_NAME,
-            output_path="nwb",
+            output_path="pophys.nwb.zarr",
         ) as ctx:
             ctx.upstream_names = list(upstream_names or [])
             ctx.output_parameters["num_planes"] = 2
@@ -528,7 +528,7 @@ class TestStageDocument(unittest.TestCase):
         process = processing.data_processes[0]
         self.assertEqual(process.process_type, ProcessName.FILE_FORMAT_CONVERSION)
         self.assertEqual(process.name, mu.DATA_PROCESS_NAME)
-        self.assertEqual(str(process.output_path), "nwb")
+        self.assertEqual(str(process.output_path), "pophys.nwb.zarr")
         self.assertEqual(process.experimenters, [])
         self.assertIsNotNone(process.resources)
 

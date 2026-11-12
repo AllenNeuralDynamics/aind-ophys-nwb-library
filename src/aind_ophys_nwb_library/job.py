@@ -261,7 +261,7 @@ def run(settings: Optional[NwbSettings] = None) -> None:
         code,
         logger=logger,
         name=mu.DATA_PROCESS_NAME,
-        output_path=relative_to_root(results_root, output_dir),
+        output_path=settings.nwb_name,
     ) as ctx:
         # Every upstream processing.json staged into this task is a flat
         # sibling dependency: no ordering, no parent/grandparent distinction.
