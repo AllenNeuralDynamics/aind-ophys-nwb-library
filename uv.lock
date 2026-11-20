@@ -123,7 +123,7 @@ requires-dist = [
     { name = "aind-data-schema", specifier = "==2.9.0" },
     { name = "aind-data-schema-models", specifier = "==6.2.0" },
     { name = "aind-nwb-utils", specifier = "==0.2.10" },
-    { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=v0.4.0" },
+    { name = "aind-pophys-metadata", git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=v0.4.1" },
     { name = "h5py", specifier = "==3.16.0" },
     { name = "hdmf", specifier = "==6.1.0" },
     { name = "hdmf-zarr", specifier = "==0.13.0" },
@@ -150,8 +150,8 @@ dev = [
 
 [[package]]
 name = "aind-pophys-metadata"
-version = "0.4.0"
-source = { git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=v0.4.0#24914e9448fc73cbeb3eda74c47f448d25a40ffd" }
+version = "0.4.1"
+source = { git = "https://github.com/AllenNeuralDynamics/aind-pophys-metadata.git?rev=v0.4.1#060c4ec9f2874dd046de2f161b5458c4bcec420e" }
 dependencies = [
     { name = "aind-data-schema" },
     { name = "aind-data-schema-models" },
